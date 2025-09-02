@@ -80,7 +80,6 @@ static void MX_USB_PCD_Init(void);
 #define seg_g GPIO_PIN_6
 
 #define GPIO_Button1 GPIO_PIN_0
-#define GPIO_Button2 GPIO_PIN_1
 
 typedef struct
 {
@@ -167,30 +166,21 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  int counter = 0;
+  int number;
   while (1)
   {
-    if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET && HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_1) == GPIO_PIN_RESET) // confirm still pressed
+    if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) // confirm still pressed
     {
-      if (counter == 15)
-        counter = 0;
-      else
-        counter++;
+      number = (rand() % 6 + 1);
+      displayHexDigit(number);
       HAL_Delay(200); // debounce
       while (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET)
         ;
     }
-    else if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_1) == GPIO_PIN_SET && HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_RESET)
+    else
     {
-      if (counter == 0)
-        counter = 0;
-      else
-        counter--;
-      HAL_Delay(200); // debounce
-      while (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_1) == GPIO_PIN_SET)
-        ;
+      displayHexDigit(16);
     }
-    displayHexDigit(counter);
   }
 }
 /**
