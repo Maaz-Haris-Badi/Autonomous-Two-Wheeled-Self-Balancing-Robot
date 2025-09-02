@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "stdlib.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -78,7 +79,8 @@ static void MX_USB_PCD_Init(void);
 #define seg_f GPIO_PIN_4
 #define seg_g GPIO_PIN_6
 
-#define GPIO_Button GPIO_PIN_0
+#define GPIO_Button1 GPIO_PIN_0
+#define GPIO_Button2 GPIO_PIN_1
 
 typedef struct
 {
@@ -114,11 +116,6 @@ const uint8_t hexDigits[17][7] = {
     {1, 0, 0, 0, 1, 1, 1}, // F
     {0, 0, 0, 0, 0, 0, 0}  // blank
 };
-
-int studentID[] = {
-  0, 9, 6, 1, 8};
-int idLength = sizeof(studentID) / sizeof(studentID[0]);
-int currentIndex = 0;
 
 // Reference:
 
@@ -170,30 +167,32 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-
+  int counter = 0;
   while (1)
   {
-    if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) // confirm still pressed
+    if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET && HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_1) == GPIO_PIN_RESET) // confirm still pressed
     {
-      displayHexDigit(studentID[currentIndex]); // show digit
-
-      currentIndex++; // move to next digit
-      if (currentIndex >= idLength)
-        currentIndex = 0; // wrap around
-
+      if (counter == 15)
+        counter = 0;
+      else
+        counter++;
+      HAL_Delay(200); // debounce
       while (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET)
-      {
-        // wait until button is released (avoid multiple increments)
-      }
+        ;
     }
-
-    else
+    else if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_1) == GPIO_PIN_SET && HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_RESET)
     {
-      displayHexDigit(16);
+      if (counter == 0)
+        counter = 0;
+      else
+        counter--;
+      HAL_Delay(200); // debounce
+      while (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_1) == GPIO_PIN_SET)
+        ;
     }
+    displayHexDigit(counter);
   }
 }
-
 /**
  * @brief System Clock Configuration
  * @retval None
@@ -263,7 +262,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -388,10 +387,16 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : B1_Pin PA1 */
-  GPIO_InitStruct.Pin = B1_Pin | GPIO_PIN_1;
+  /*Configure GPIO pin : B1_Pin */
+  GPIO_InitStruct.Pin = B1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PA1 */
+  GPIO_InitStruct.Pin = GPIO_PIN_1;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PD0 PD2 PD4 PD6 */
