@@ -78,6 +78,8 @@ static void MX_USB_PCD_Init(void);
 #define seg_f GPIO_PIN_4
 #define seg_g GPIO_PIN_6
 
+#define GPIO_Button GPIO_PIN_0
+
 typedef struct
 {
   GPIO_TypeDef *port;
@@ -93,7 +95,7 @@ SegmentPin seg_pins[] = {
     {GPIOD, GPIO_PIN_6}  // seg_g
 };
 
-const uint8_t hexDigits[16][7] = {
+const uint8_t hexDigits[17][7] = {
     {1, 1, 1, 1, 1, 1, 0}, // 0
     {0, 1, 1, 0, 0, 0, 0}, // 1
     {1, 1, 0, 1, 1, 0, 1}, // 2
@@ -109,8 +111,14 @@ const uint8_t hexDigits[16][7] = {
     {1, 0, 0, 1, 1, 1, 0}, // C
     {0, 1, 1, 1, 1, 0, 1}, // d
     {1, 0, 0, 1, 1, 1, 1}, // E
-    {1, 0, 0, 0, 1, 1, 1}  // F
+    {1, 0, 0, 0, 1, 1, 1}, // F
+    {0, 0, 0, 0, 0, 0, 0}  // blank
 };
+
+int studentID[] = {
+  0, 9, 6, 1, 8};
+int idLength = sizeof(studentID) / sizeof(studentID[0]);
+int currentIndex = 0;
 
 // Reference:
 
@@ -118,7 +126,7 @@ const uint8_t hexDigits[16][7] = {
 
 void displayHexDigit(uint8_t digit)
 {
-  if (digit > 15)
+  if (digit > 16)
     return; // only 0–F valid
 
   for (int i = 0; i < 7; i++)
@@ -162,20 +170,28 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+
   while (1)
   {
-      for (uint8_t d = 0; d < 16; d++)
+    if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) // confirm still pressed
+    {
+      displayHexDigit(studentID[currentIndex]); // show digit
+
+      currentIndex++; // move to next digit
+      if (currentIndex >= idLength)
+        currentIndex = 0; // wrap around
+
+      while (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET)
       {
-        displayHexDigit(d);
-        HAL_Delay(2000); // 2 sec
+        // wait until button is released (avoid multiple increments)
       }
-    
+    }
 
-    /* USER CODE END WHILE */
-
-    /* USER CODE BEGIN 3 */
+    else
+    {
+      displayHexDigit(16);
+    }
   }
-  /* USER CODE END 3 */
 }
 
 /**
