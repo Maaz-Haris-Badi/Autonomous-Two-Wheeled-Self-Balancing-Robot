@@ -75,7 +75,7 @@ static void MX_USB_PCD_Init(void);
 void delay_ms ( uint32_t ms){
   __HAL_TIM_SET_COUNTER(&htim2, 0);
   HAL_TIM_Base_Start(&htim2);
-  while (__HAL_TIM_GET_COUNTER(&htim2)<1000){  }
+  while (__HAL_TIM_GET_COUNTER(&htim2)<ms){  }
   HAL_TIM_Base_Stop(&htim2);
 }
 int main(void)
