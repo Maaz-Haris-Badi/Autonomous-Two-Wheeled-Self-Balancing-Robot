@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <string.h>
 
+
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
@@ -66,7 +67,12 @@ PCD_HandleTypeDef hpcd_USB_FS;
 
 // Constants
 #define PPR 1920 // pulses per revolution
-
+                 // Globals
+uint32_t ic_val1 = 0, ic_val2 = 0;
+uint32_t capture_done = 0;
+uint8_t first_capture = 0;
+int period_ticks = 0;
+int frequency = 0, rpm = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -132,57 +138,39 @@ int main(void)
   MX_USART2_UART_Init();
   MX_USB_PCD_Init();
   /* USER CODE BEGIN 2 */
-  print("\r\n=== Lab 06 Task 3: Encoder RPM Measurement (Polling) ===\r\n");
-  HAL_TIM_Base_Start(&htim2);
-  HAL_TIM_Base_Start(&htim3);
+  print("\r\n=== Lab 06 Task 4: Encoder RPM via Input Capture ===\r\n");
 
-  // Setup motor direction
+  // Motor setup
+  // ---- MOTOR CONTROL (TIM2 PWM) ----
   HAL_GPIO_WritePin(MOTOR_PORT, MOTOR_IN1_Pin, GPIO_PIN_SET);
   HAL_GPIO_WritePin(MOTOR_PORT, MOTOR_IN2_Pin, GPIO_PIN_RESET);
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
-  uint32_t duty = 500; // 50% duty cycle
-  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, duty);
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 500); // 50% duty cycle
 
-  // uint32_t t1 = 0, t2 = 0;
-  uint32_t period_ticks = 0;
+  // ---- ENCODER INPUT CAPTURE (TIM3) ----
+  HAL_TIM_IC_Start_IT(&htim3, TIM_CHANNEL_1);
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
-  /* USER CODE END WHILE */
-
+  /* USER CODE BEGIN WHILE */
   while (1)
   {
-    // Wait for first falling edge
-    while (HAL_GPIO_ReadPin(ENCODER_PORT, ENCODER_Pin) == GPIO_PIN_SET)
-      ;
-    while (HAL_GPIO_ReadPin(ENCODER_PORT, ENCODER_Pin) == GPIO_PIN_RESET)
-      ;
-    __HAL_TIM_SET_COUNTER(&htim3, 0); // Reset timer
-
-    // Wait for next falling edge
-    while (HAL_GPIO_ReadPin(ENCODER_PORT, ENCODER_Pin) == GPIO_PIN_SET)
-      ;
-    while (HAL_GPIO_ReadPin(ENCODER_PORT, ENCODER_Pin) == GPIO_PIN_RESET)
-      ;
-    period_ticks = __HAL_TIM_GET_COUNTER(&htim3);
-
-    // Avoid division by zero / overflow
-    if (period_ticks > 0 && period_ticks < 60000)
+    if (capture_done)
     {
-      int freq = 1000000 / (double)period_ticks; // Hz (since TIM3 tick = 1 µs)
-      int rpm = (60 * freq) / PPR;
+      capture_done = 0;
 
-      print("Ticks: %lu   Freq: %d Hz   RPM: %d\r\n", period_ticks, freq, rpm);
-    }
-    else
-    {
-      print("Ticks: %lu   (invalid period)\r\n", period_ticks);
-    }
+      if (period_ticks > 0)
+      {
+        frequency = 1000000 / period_ticks; // Hz
+        rpm = (60 * frequency) / PPR;
 
-    HAL_Delay(300);
+        print("Ticks: %lu   Freq: %d Hz   RPM: %d\r\n", period_ticks, frequency, rpm);
+      }
+    }
+    HAL_Delay(200);
   }
-
-  /* USER CODE BEGIN 3 */
+  /* USER CODE END 3 */
 }
 
 /**
@@ -533,7 +521,31 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
+{
+  static uint32_t first = 0;
 
+  if (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1)
+  {
+    if (first == 0)
+    {
+      ic_val1 = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+      first = 1;
+    }
+    else if (first == 1)
+    {
+      ic_val2 = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+
+      if (ic_val2 > ic_val1)
+        period_ticks = ic_val2 - ic_val1;
+      else
+        period_ticks = (0xFFFF - ic_val1) + ic_val2; // handle overflow
+
+      first = 0;
+      capture_done = 1;
+    }
+  }
+}
 /* USER CODE END 4 */
 
 /**
