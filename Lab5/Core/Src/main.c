@@ -161,7 +161,7 @@ while (1)
 
 /**
   * @brief System Clock Configuration
-  * @retval None
+  * @retval NoneSS
   */
 void SystemClock_Config(void)
 {
