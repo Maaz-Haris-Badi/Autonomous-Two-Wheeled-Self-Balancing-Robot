@@ -71,12 +71,11 @@ static void MX_USART2_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-volatile int edge_state = 0;        // 0 = waiting first edge, 1 = waiting second edge
-volatile uint32_t period_ticks = 0; // last measured period
-int samples[10];
-int samp_idx = 0;            // num of values
-volatile int print_flag = 0; // set to 1 when samples[] is full
-char buffer[50];
+uint32_t ic_val1 = 0;
+uint32_t ic_val2 = 0;
+uint8_t is_captured = 0;
+uint32_t difference = 0;
+int frequency = 0;
 // __HAL_RCC_AFIO_CLK_ENABLE();
 
 void print(const char *fmt, ...)
@@ -88,37 +87,6 @@ void print(const char *fmt, ...)
   va_end(args);
   HAL_UART_Transmit(&huart2, (uint8_t *)buffer, strlen(buffer), HAL_MAX_DELAY);
 }
-
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
-{
-  if (GPIO_Pin == GPIO_PIN_0)
-  {
-    print("Edge!\r\n");
-
-    if (edge_state == 0)
-    {
-      __HAL_TIM_SET_COUNTER(&htim2, 0);
-      edge_state = 1;
-    }
-    else
-    {
-      period_ticks = __HAL_TIM_GET_COUNTER(&htim2);
-      print("Ticks: %lu\r\n", period_ticks); // <-- Add this
-      edge_state = 0;
-
-      if (samp_idx < (int)(sizeof(samples) / sizeof(samples[0])))
-      {
-        samples[samp_idx++] = (int)period_ticks;
-        if (samp_idx == (int)(sizeof(samples) / sizeof(samples[0])))
-        {
-          print_flag = 1;
-          print("Buffer full!\r\n"); // <-- Confirm this
-        }
-      }
-    }
-  }
-}
-
 
 /* USER CODE END 0 */
 
@@ -158,7 +126,7 @@ int main(void)
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
 
-  HAL_TIM_Base_Start(&htim2);
+  HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1);
   print("Timer 2 started for edge timing...\r\n");
   /* USER CODE END 2 */
 
@@ -166,36 +134,12 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    char msg[40];
-    snprintf(msg, sizeof(msg),
-             "state=%d, flag=%d\r\n",
-             edge_state, print_flag);
-    HAL_UART_Transmit(&huart2, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
-
-    if (print_flag)
+    if (is_captured)
     {
-      long sum = 0;
-      for (int i = 0; i < (int)(sizeof(samples) / sizeof(samples[0])); i++)
-        sum += samples[i];
-
-      double avg_ticks = (double)sum / (double)(sizeof(samples) / sizeof(samples[0]));
-
-      // TIM2 frequency = 72 MHz / (Prescaler + 1)
-      double tick_hz = 72000000.0 / (47 + 1); // = 1.5 MHz
-      double f_hz = tick_hz / avg_ticks;
-      double f_err_hz = tick_hz / (avg_ticks * avg_ticks);
-
-      char msg2[128];
-      snprintf(msg2, sizeof(msg2),
-               "avg_ticks = %.2f   f = %.2f Hz   +/- %.4f Hz\r\n",
-               avg_ticks, f_hz, f_err_hz);
-      HAL_UART_Transmit(&huart2, (uint8_t *)msg2, strlen(msg2), HAL_MAX_DELAY);
-
-      samp_idx = 0;
-      print_flag = 0;
+      print("Frequency: %.d Hz\r\n", frequency);
+      HAL_Delay(500);
+      is_captured = 0;
     }
-
-    HAL_Delay(100);
   }
   /* USER CODE END 3 */
 }
@@ -380,6 +324,33 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 2 */
   HAL_TIM_MspPostInit(&htim2);
+}
+
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1)
+  {
+    if (is_captured == 0)
+    {
+      ic_val1 = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+      is_captured = 1;
+    }
+    else
+    {
+      ic_val2 = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+
+      if (ic_val2 > ic_val1)
+        difference = ic_val2 - ic_val1;
+      else
+        difference = (0xFFFF - ic_val1) + ic_val2;
+
+      float time_period = difference * 1e-6; // 1 tick = 1 µs
+      frequency = 1.0 / time_period;
+
+      is_captured = 1; // Set flag for main loop
+      ic_val1 = ic_val2;
+    }
+  }
 }
 
 /**
