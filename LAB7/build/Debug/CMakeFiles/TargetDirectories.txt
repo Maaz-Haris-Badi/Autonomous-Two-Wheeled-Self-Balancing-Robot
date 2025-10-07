@@ -1,0 +1,6 @@
+/home/abbas/MCI-COURSE/LAB7/build/Debug/CMakeFiles/LAB7.dir
+/home/abbas/MCI-COURSE/LAB7/build/Debug/CMakeFiles/edit_cache.dir
+/home/abbas/MCI-COURSE/LAB7/build/Debug/CMakeFiles/rebuild_cache.dir
+/home/abbas/MCI-COURSE/LAB7/build/Debug/cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir
+/home/abbas/MCI-COURSE/LAB7/build/Debug/cmake/stm32cubemx/CMakeFiles/edit_cache.dir
+/home/abbas/MCI-COURSE/LAB7/build/Debug/cmake/stm32cubemx/CMakeFiles/rebuild_cache.dir
