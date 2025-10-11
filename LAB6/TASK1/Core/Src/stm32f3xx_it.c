@@ -212,6 +212,13 @@ void EXTI0_IRQHandler(void)
   /* USER CODE END EXTI0_IRQn 1 */
 }
 
+extern TIM_HandleTypeDef htim2;
+
+void TIM2_IRQHandler(void)
+{
+    HAL_TIM_IRQHandler(&htim2);
+}
+
 /* USER CODE BEGIN 1 */
 
 /* USER CODE END 1 */
