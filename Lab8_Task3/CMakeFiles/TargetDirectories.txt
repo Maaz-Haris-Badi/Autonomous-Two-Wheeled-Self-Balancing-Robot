@@ -1,0 +1,6 @@
+/home/arshiyan-tarique/MCI-COURSE/Lab8_Task3/CMakeFiles/Lab8_Task3.dir
+/home/arshiyan-tarique/MCI-COURSE/Lab8_Task3/CMakeFiles/edit_cache.dir
+/home/arshiyan-tarique/MCI-COURSE/Lab8_Task3/CMakeFiles/rebuild_cache.dir
+/home/arshiyan-tarique/MCI-COURSE/Lab8_Task3/cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir
+/home/arshiyan-tarique/MCI-COURSE/Lab8_Task3/cmake/stm32cubemx/CMakeFiles/edit_cache.dir
+/home/arshiyan-tarique/MCI-COURSE/Lab8_Task3/cmake/stm32cubemx/CMakeFiles/rebuild_cache.dir
