@@ -27,18 +27,19 @@ float32_t inputBuffer [ FILTER_LEN ];
 float32_t output ;
 
 void apply_moving_average ( float32_t new_sample ) {
-// Store the input ADC value in the buffer :
-  static uint8_t index = 0;
+{
+    static uint8_t index = 0;
+    static uint8_t count = 0; // number of valid samples in buffer
 
-  inputBuffer[index] = new_sample;
-  index++;
+    inputBuffer[index] = new_sample;
+    index = (index + 1) % FILTER_LEN;
 
-  if (index >= FILTER_LEN)
-  {
-      arm_mean_f32(inputBuffer, FILTER_LEN, &output);
-      index = 0;  // reset for next batch
-  }
+    if (count < FILTER_LEN)
+        count++;
 
+    // Compute mean over all valid samples after every new input
+    arm_mean_f32(inputBuffer, count, &output);
+}
 }
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -152,7 +153,7 @@ int main(void)
           apply_moving_average(sample);
 
           print("%lu,%.2f\r\n", raw, output*1.0f);
-          HAL_Delay(100);
+          HAL_Delay(10);
       }
   }
 
