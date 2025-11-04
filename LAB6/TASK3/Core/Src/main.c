@@ -66,7 +66,7 @@ PCD_HandleTypeDef hpcd_USB_FS;
 #define ENCODER_PORT GPIOC
 
 // Constants
-#define PPR 1920 // pulses per revolution
+#define PPR 330 // pulses per revolution
                  // Globals
 uint32_t ic_val1 = 0, ic_val2 = 0;
 uint32_t capture_done = 0;
@@ -145,7 +145,7 @@ int main(void)
   HAL_GPIO_WritePin(MOTOR_PORT, MOTOR_IN1_Pin, GPIO_PIN_SET);
   HAL_GPIO_WritePin(MOTOR_PORT, MOTOR_IN2_Pin, GPIO_PIN_RESET);
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
-  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 500); // 50% duty cycle
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 800); // 50% duty cycle
 
   // ---- ENCODER INPUT CAPTURE (TIM3) ----
   HAL_TIM_IC_Start_IT(&htim3, TIM_CHANNEL_1);
@@ -168,7 +168,7 @@ int main(void)
         print("Ticks: %lu   Freq: %d Hz   RPM: %d\r\n", period_ticks, frequency, rpm);
       }
     }
-    HAL_Delay(200);
+    HAL_Delay(100);
   }
   /* USER CODE END 3 */
 }

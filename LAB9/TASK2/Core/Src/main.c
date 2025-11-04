@@ -248,9 +248,9 @@ void Read_Gyro(LSM_Data *data)
   data->raw_gz = (int16_t)((raw[5] << 8) | raw[4]);
 
   // Convert to dps (°/s): sensitivity = 8.75 mdps/LSB for ±250dps range
-  data->gx = data->raw_gx * 8.75f / 1000.0f;
-  data->gy = data->raw_gy * 8.75f / 1000.0f;
-  data->gz = data->raw_gz * 8.75f / 1000.0f;
+  data->gx = data->raw_gx;
+  data->gy = data->raw_gy ;
+  data->gz = data->raw_gz;
 }
 
 void Offset_LSM(LSM_Data *data)
@@ -278,9 +278,7 @@ void Offset_LSM(LSM_Data *data)
 
 void Print_data(LSM_Data *data)
 {
-  printf("%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\r\n",
-         data->ax, data->ay, data->az,
-         data->gx, data->gy, data->gz);
+  printf("%d,%d,%d,%d,%d,%d\r\n",data->gx,data->gy,data->gz,data->ax,data->ay,data->az);
 }
 
 /**

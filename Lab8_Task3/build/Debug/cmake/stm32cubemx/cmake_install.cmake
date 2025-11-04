@@ -1,4 +1,4 @@
-# Install script for directory: /home/arshiyan-tarique/MCI-COURSE/Lab8_Task3/cmake/stm32cubemx
+# Install script for directory: /home/abbas/MCI-COURSE/Lab8_Task3/cmake/stm32cubemx
 
 # Set the install prefix
 if(NOT DEFINED CMAKE_INSTALL_PREFIX)
@@ -32,8 +32,14 @@ if(NOT DEFINED CMAKE_CROSSCOMPILING)
   set(CMAKE_CROSSCOMPILING "TRUE")
 endif()
 
-# Set default install directory permissions.
+# Set path to fallback-tool for dependency-resolution.
 if(NOT DEFINED CMAKE_OBJDUMP)
-  set(CMAKE_OBJDUMP "/home/arshiyan-tarique/STM32CubeCLT/GNU-tools-for-STM32/bin/arm-none-eabi-objdump")
+  set(CMAKE_OBJDUMP "/home/abbas/.local/share/stm32cube/bundles/gnu-tools-for-stm32/13.3.1+st.9/bin/arm-none-eabi-objdump")
 endif()
 
+string(REPLACE ";" "\n" CMAKE_INSTALL_MANIFEST_CONTENT
+       "${CMAKE_INSTALL_MANIFEST_FILES}")
+if(CMAKE_INSTALL_LOCAL_ONLY)
+  file(WRITE "/home/abbas/MCI-COURSE/Lab8_Task3/build/Debug/cmake/stm32cubemx/install_local_manifest.txt"
+     "${CMAKE_INSTALL_MANIFEST_CONTENT}")
+endif()

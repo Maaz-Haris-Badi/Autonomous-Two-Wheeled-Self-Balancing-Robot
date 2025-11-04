@@ -92,12 +92,12 @@ void Read_WHO_AM_I(void)
     HAL_SPI_Receive(&hspi1, &who_am_i, 1, HAL_MAX_DELAY);
     CS_HIGH();
 
-    printf("WHO_AM_I register value: 0x%02X\r\n", who_am_i);
+    print("WHO_AM_I register value: 0x%02X\r\n", who_am_i);
 
-    if (who_am_i == 0xD3)
-        printf("I3G4250D detected successfully!\r\n");
+    if (who_am_i == 0xD4)
+        print("I3G4250D detected successfully!\r\n");
     else
-        printf("Communication error. Received: 0x%02X\r\n", who_am_i);
+        print("Communication error. Received: 0x%02X\r\n", who_am_i);
 }
 /* USER CODE END 0 */
 
@@ -140,7 +140,8 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  printf("Starting WHO_AM_I read...\r\n");
+  print("Starting WHO_AM_I read...\r\n");
+  
     while (1)
     {
         HAL_Delay(1000);

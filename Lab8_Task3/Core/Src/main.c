@@ -184,7 +184,7 @@ int main(void)
     int16_t y = (int16_t)(spi_read(OUT_Y_H) << 8 | spi_read(OUT_Y_L));
     int16_t z = (int16_t)(spi_read(OUT_Z_H) << 8 | spi_read(OUT_Z_L));
 
-  print("%d,%d,%d,%d\r\n", temp, x, y, z);
+  print("%d \t %d \t %d \t %d\r\n", temp, x, y, z);
 
     HAL_Delay(200);
     /* USER CODE BEGIN 3 */
