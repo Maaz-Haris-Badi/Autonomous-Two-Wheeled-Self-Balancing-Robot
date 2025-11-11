@@ -20,6 +20,7 @@
 #include "main.h"
 #include "stdio.h"
 #include "math.h"
+#include "stm32f3xx_hal_i2c.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -93,10 +94,10 @@ int _write(int file, char *ptr, int len)
 typedef struct
 {
   int16_t raw_ax, raw_ay, raw_az;
-  int16_t ax, ay, az;
-  int16_t ax_offset, ay_offset, az_offset;
+  float ax, ay, az;
+  float ax_offset, ay_offset, az_offset;
   int16_t raw_gx, raw_gy, raw_gz;
-  int16_t gx, gy, gz;
+  float gx, gy, gz;
 } SensorData;
 
 SensorData sensor;
@@ -104,10 +105,10 @@ SensorData sensor;
 // --- Function prototypes ---
 void Init_LSM(void);
 void Init_Gyro(void);
-void Read_Accel(SensorData *s, uint8_t apply_offset);
+void Read_Accel(SensorData *s, float apply_offset);
 void Read_Gyro(SensorData *s);
 /* USER CODE END 0 */
-float accAngleX = 0, gyroAngleX = 0, angleX = 0;
+float accAngleY = 0, gyroAngleX = 0, angleX = 0;
 float dt = 0.1f; // 100ms loop delay
 /**
  * @brief  The application entry point.
@@ -123,6 +124,7 @@ int main(void)
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+
   HAL_Init();
 
   /* USER CODE BEGIN Init */
@@ -153,17 +155,26 @@ int main(void)
 
   while (1)
   {
-    Read_Accel(&sensor, 0);
+    Read_Accel(&sensor, 0.5);
     Read_Gyro(&sensor);
 
     // --- Compute tilt from accelerometer (Y-axis only) ---
-    accAngleX = sensor.ay * 180.0f / M_PI;
+    // sensor.ay is in g (≈ -1.0 .. +1.0)
+    float y_norm = sensor.ay/9.81;            // if already in g, otherwise divide by 9.81
+
+    // Clamp to [-1, 1] to be safe
+    if (y_norm > 1.0f)  y_norm = 1.0f;
+    if (y_norm < -1.0f) y_norm = -1.0f;
+
+    // angle of Y axis w.r.t. gravity (in degrees)
+    accAngleY = asinf(y_norm) * 180.0f / M_PI;
+
 
     // --- Complementary Filter ---
-    angleX = 0.98f * (angleX + sensor.gx * dt) + 0.02f * accAngleX;
+    angleX = 0.98f * (angleX + sensor.gx * dt) + 0.02f * accAngleY;
 
     // --- Print comma-separated data for Python plotter ---
-    printf("%.2f,%d,%.2f\r\n", accAngleX, sensor.gx, angleX);
+    printf("%.2f\r\n", accAngleY);
 
     HAL_Delay(100);
   }
@@ -175,13 +186,13 @@ void Init_LSM(void)
 
   // Enable all axes, 100 Hz, normal mode
   data[0] = CTRL_REG1_A;
-  data[1] = 0x57;
-  HAL_I2C_Master_Transmit(&hi2c1, LSM303AGR_ACC_ADDR, data, 2, HAL_MAX_DELAY);
+  data[1] = 0x67;
+  HAL_I2C_Mem_Write(&hi2c1, 0x32, 0x20,I2C_MEMADD_SIZE_8BIT, &data[1], 1, HAL_MAX_DELAY);
 
   // ±2g, continuous update
   data[0] = CTRL_REG4_A;
   data[1] = 0x00;
-  HAL_I2C_Master_Transmit(&hi2c1, LSM303AGR_ACC_ADDR, data, 2, HAL_MAX_DELAY);
+  HAL_I2C_Mem_Write(&hi2c1, 0x32, 0x23,I2C_MEMADD_SIZE_8BIT, &data[1], 1, HAL_MAX_DELAY);
 
   HAL_Delay(50);
 
@@ -240,17 +251,22 @@ void Init_Gyro(void)
 }
 
 
-void Read_Accel(SensorData *data, uint8_t apply_offset)
+void Read_Accel(SensorData *data, float apply_offset)
 {
   uint8_t raw[6];
-  HAL_I2C_Mem_Read(&hi2c1, LSM303AGR_ACC_ADDR, OUT_X_L_A | 0x80, I2C_MEMADD_SIZE_8BIT, raw, 6, HAL_MAX_DELAY);
+  HAL_I2C_Mem_Read(&hi2c1, 0x33, 0x2a, I2C_MEMADD_SIZE_8BIT, &raw[2], 1, HAL_MAX_DELAY);
+  HAL_I2C_Mem_Read(&hi2c1, 0x33, 0x2b, I2C_MEMADD_SIZE_8BIT, &raw[3], 1, HAL_MAX_DELAY);
+
 
   data->raw_ax = (int16_t)((raw[1] << 8) | raw[0]);
   data->raw_ay = (int16_t)((raw[3] << 8) | raw[2]);
   data->raw_az = (int16_t)((raw[5] << 8) | raw[4]);
 
+  data->raw_ay = (data->raw_ay) >> 6 ;
+
+
   float ax_scaled = data->raw_ax * 3.9f / 1000.0f;
-  float ay_scaled = data->raw_ay * 3.9f / 1000.0f;
+  float ay_scaled = data->raw_ay * (4.0f / 100.0f);
   float az_scaled = data->raw_az * 3.9f / 1000.0f;
 
   if (apply_offset)
@@ -302,7 +318,7 @@ void Offset_LSM(SensorData *data)
   data->ay_offset = sum_y / 20.0f;
   data->az_offset = sum_z / 20.0f;
 
-  printf("Offsets -> X: %d, Y: %d, Z: %d\r\n", data->ax_offset, data->ay_offset, data->az_offset);
+  printf("Offsets -> X: %.2f, Y: %.2f, Z: %.2f\r\n", data->ax_offset, data->ay_offset, data->az_offset);
 }
 
 void Print_data(SensorData *data)
@@ -412,37 +428,26 @@ static void MX_I2C1_Init(void)
  */
 static void MX_SPI1_Init(void)
 {
-
-  /* USER CODE BEGIN SPI1_Init 0 */
-
-  /* USER CODE END SPI1_Init 0 */
-
-  /* USER CODE BEGIN SPI1_Init 1 */
-
-  /* USER CODE END SPI1_Init 1 */
-  /* SPI1 parameter configuration*/
-  hspi1.Instance = SPI1;
-  hspi1.Init.Mode = SPI_MODE_MASTER;
-  hspi1.Init.Direction = SPI_DIRECTION_2LINES;
-  hspi1.Init.DataSize = SPI_DATASIZE_4BIT;
-  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
-  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
-  hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;
-  hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
-  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
-  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
-  hspi1.Init.CRCPolynomial = 7;
-  hspi1.Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
-  hspi1.Init.NSSPMode = SPI_NSS_PULSE_ENABLE;
-  if (HAL_SPI_Init(&hspi1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN SPI1_Init 2 */
-
-  /* USER CODE END SPI1_Init 2 */
+    hspi1.Instance = SPI1;
+    hspi1.Init.Mode = SPI_MODE_MASTER;
+    hspi1.Init.Direction = SPI_DIRECTION_2LINES;
+    hspi1.Init.DataSize = SPI_DATASIZE_8BIT;        // 8-bit
+    hspi1.Init.CLKPolarity = SPI_POLARITY_HIGH;     // mode 3
+    hspi1.Init.CLKPhase = SPI_PHASE_2EDGE;          // mode 3
+    hspi1.Init.NSS = SPI_NSS_SOFT;
+    hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4; // fine
+    hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
+    hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
+    hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+    hspi1.Init.CRCPolynomial = 7;
+    hspi1.Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
+    hspi1.Init.NSSPMode = SPI_NSS_PULSE_DISABLE; // or ENABLE, both usually ok
+    if (HAL_SPI_Init(&hspi1) != HAL_OK)
+    {
+        Error_Handler();
+    }
 }
+
 
 /**
  * @brief USART2 Initialization Function
