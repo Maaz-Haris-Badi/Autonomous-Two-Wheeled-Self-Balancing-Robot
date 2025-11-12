@@ -77,8 +77,8 @@ static void MX_USB_PCD_Init(void);
 #define WHO_AM_I_G 0x0F
 #define CTRL_REG1_G 0x20
 #define CTRL_REG4_G 0x23
-#define OUT_X_L_G 0x28
-#define OUT_X_H_G 0x29
+#define OUT_Y_L_G 0x2A
+#define OUT_Y_H_G 0x2B
 
 // ===== SPI CS Control =====
 #define CS_LOW() HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_RESET) // Adjust pin as per your config
@@ -92,13 +92,14 @@ int _write(int file, char *ptr, int len)
 }
 
 typedef struct
-{
-  int16_t raw_ax, raw_ay, raw_az;
-  float ax, ay, az;
-  float ax_offset, ay_offset, az_offset;
-  int16_t raw_gx, raw_gy, raw_gz;
-  float gx, gy, gz;
-} SensorData;
+   {
+    int16_t raw_ax, raw_ay, raw_az;
+    float ax, ay, az;
+    float ax_offset, ay_offset, az_offset;
+    int16_t raw_gx, raw_gy, raw_gz;
+    float gx, gy, gz;
+    float gy_offset;
+   } SensorData;
 
 SensorData sensor;
 
@@ -107,6 +108,8 @@ void Init_LSM(void);
 void Init_Gyro(void);
 void Read_Accel(SensorData *s, float apply_offset);
 void Read_Gyro(SensorData *s);
+void Calibrate_Gyro(SensorData *s);
+void Offset_LSM(SensorData *data);
 /* USER CODE END 0 */
 float accAngleY = 0, gyroAngleX = 0, angleX = 0;
 float dt = 0.1f; // 100ms loop delay
@@ -147,20 +150,22 @@ int main(void)
   /* USER CODE BEGIN 2 */
   Init_LSM();
   Init_Gyro();
+  Offset_LSM(&sensor);              // <-- add this
+  Calibrate_Gyro(&sensor); // Add this!
   printf("System Ready\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 
-  while (1)
-  {
-    Read_Accel(&sensor, 0.5);
+  // Fix 1: Correct the while loop
+while (1)
+{
+    Read_Accel(&sensor, 1);  // Pass 1 to apply offset, or 0 to not apply
     Read_Gyro(&sensor);
 
     // --- Compute tilt from accelerometer (Y-axis only) ---
-    // sensor.ay is in g (≈ -1.0 .. +1.0)
-    float y_norm = sensor.ay/9.81;            // if already in g, otherwise divide by 9.81
+    float y_norm = sensor.ay / 9.81;
 
     // Clamp to [-1, 1] to be safe
     if (y_norm > 1.0f)  y_norm = 1.0f;
@@ -169,15 +174,16 @@ int main(void)
     // angle of Y axis w.r.t. gravity (in degrees)
     accAngleY = asinf(y_norm) * 180.0f / M_PI;
 
+    // --- Complementary Filter (FIXED: use sensor.gy not sensor.gx) ---
+    angleX = 0.98f * (angleX + sensor.gy * dt) + 0.02f * accAngleY;
 
-    // --- Complementary Filter ---
-    angleX = 0.98f * (angleX + sensor.gx * dt) + 0.02f * accAngleY;
+    // --- Print: Accel Angle, Gyro Rate, Fused Angle ---
+    printf("%.2f\r\n", sensor.ay_offset);
 
-    // --- Print comma-separated data for Python plotter ---
-    printf("%.2f\r\n", accAngleY);
+    printf("%.2f,%.2f,%.2f\r\n", accAngleY, sensor.gy, angleX);
 
     HAL_Delay(100);
-  }
+}
 }
 
 void Init_LSM(void)
@@ -206,7 +212,7 @@ void Init_LSM(void)
 }
 void spi_write(uint8_t reg, uint8_t value)
 {
-    uint8_t data[2] = {reg & 0x7F, value};  // Write command (MSB = 0)
+    uint8_t data[2] = {reg & 0x7F, value};  // Write: MSB = 0
     CS_LOW();
     HAL_SPI_Transmit(&hspi1, data, 2, HAL_MAX_DELAY);
     CS_HIGH();
@@ -214,41 +220,92 @@ void spi_write(uint8_t reg, uint8_t value)
 
 uint8_t spi_read(uint8_t reg)
 {
-  uint8_t tx[2];
-  uint8_t rx[2];
-  tx[0] = reg | 0x80; // Read command (MSB = 1)
+    uint8_t tx[2];
+    uint8_t rx[2];
+    tx[0] = reg | 0x80; // Read: MSB = 1
+    tx[1] = 0x00;
 
-  tx[1] = 0x00;
+    CS_LOW();
+    HAL_SPI_TransmitReceive(&hspi1, tx, rx, 2, HAL_MAX_DELAY);
+    CS_HIGH();
 
-  CS_LOW();
-  HAL_SPI_TransmitReceive(&hspi1, tx, rx, 2, HAL_MAX_DELAY);
-  CS_HIGH();
-
-  return rx[1];
+    return rx[1];
+}
+void spi_read_axis(uint8_t reg_low, int16_t *value)
+{
+    uint8_t low = spi_read(reg_low);
+    uint8_t high = spi_read(reg_low + 1);
+    *value = (int16_t)(high << 8 | low);
 }
 
 void Init_Gyro(void)
 {
+    // Small delay to ensure sensor is ready
+    HAL_Delay(100);
+    
     uint8_t whoami = spi_read(WHO_AM_I_G);
 
     if (whoami != 0xD3) // Expected value for I3G4250D
     {
-        printf("Gyro WHO_AM_I error: 0x%02X\r\n", whoami);
+        printf("Gyro WHO_AM_I error: 0x%02X (expected 0xD3)\r\n", whoami);
     }
     else
     {
-        printf("Gyro WHO_AM_I: 0x%02X\r\n", whoami);
+        printf("Gyro WHO_AM_I: 0x%02X - OK\r\n", whoami);
     }
 
-    // Power on, enable X/Y/Z, ODR = 100Hz
+    // CTRL_REG1: Power on, enable X/Y/Z, ODR = 100Hz, BW = 25Hz
+    // 0x0F = 0000 1111 (DR=00, BW=00, PD=1, Zen=1, Yen=1, Xen=1)
     spi_write(CTRL_REG1_G, 0x0F);
 
-    // ±245 dps full-scale
+    // CTRL_REG4: ±245 dps full-scale, continuous update
+    // 0x00 = 0000 0000 (BDU=0, BLE=0, FS=00, -)
     spi_write(CTRL_REG4_G, 0x00);
 
     HAL_Delay(50);
     printf("I3G4250D Gyroscope Initialized\r\n");
 }
+
+void Read_Gyro(SensorData *s)
+{
+    int16_t gy_raw;
+
+    // Read Y-axis (low and high bytes)
+    uint8_t yl = spi_read(OUT_Y_L_G);
+    uint8_t yh = spi_read(OUT_Y_H_G);
+    
+    gy_raw = (int16_t)(yh << 8 | yl);
+
+    // Convert to degrees per second (8.75 mdps/LSB for ±245 dps)
+    s->raw_gy = gy_raw;
+    s->gy = (gy_raw * 8.75f / 1000.0f) - s->gy_offset;
+}
+
+void Calibrate_Gyro(SensorData *s)
+{
+    float sum_gy = 0;
+    uint8_t samples = 100;
+
+    printf("Calibrating gyroscope... Keep sensor STILL!\r\n");
+
+    for (uint8_t i = 0; i < samples; i++)
+    {
+        int16_t gy_raw;
+        uint8_t yl = spi_read(OUT_Y_L_G);
+        uint8_t yh = spi_read(OUT_Y_H_G);
+        
+        gy_raw = (int16_t)(yh << 8 | yl);
+        sum_gy += gy_raw * 8.75f / 1000.0f;
+
+        HAL_Delay(10);
+    }
+
+    s->gy_offset = sum_gy / samples;
+
+    printf("Gyro Y Offset: %.2f deg/s\r\n", s->gy_offset);
+}
+
+
 
 
 void Read_Accel(SensorData *data, float apply_offset)
@@ -258,49 +315,27 @@ void Read_Accel(SensorData *data, float apply_offset)
   HAL_I2C_Mem_Read(&hi2c1, 0x33, 0x2b, I2C_MEMADD_SIZE_8BIT, &raw[3], 1, HAL_MAX_DELAY);
 
 
-  data->raw_ax = (int16_t)((raw[1] << 8) | raw[0]);
   data->raw_ay = (int16_t)((raw[3] << 8) | raw[2]);
-  data->raw_az = (int16_t)((raw[5] << 8) | raw[4]);
 
   data->raw_ay = (data->raw_ay) >> 6 ;
 
 
-  float ax_scaled = data->raw_ax * 3.9f / 1000.0f;
   float ay_scaled = data->raw_ay * (4.0f / 100.0f);
-  float az_scaled = data->raw_az * 3.9f / 1000.0f;
 
   if (apply_offset)
   {
-    data->ax = ax_scaled - data->ax_offset;
     data->ay = ay_scaled - data->ay_offset;
-    data->az = az_scaled - data->az_offset;
   }
   else
   {
-    data->ax = ax_scaled;
     data->ay = ay_scaled;
-    data->az = az_scaled;
   }
-}
-
-
-void Read_Gyro(SensorData *s)
-{
-    int16_t gx_raw;
-
-    uint8_t xl = spi_read(OUT_X_L_G);
-    uint8_t xh = spi_read(OUT_X_H_G);
-
-    gx_raw = (int16_t)(xh << 8 | xl);
-
-    // Convert to degrees per second (8.75 mdps/LSB)
-    s->gx = gx_raw * 8.75f / 1000.0f;
 }
 
 
 void Offset_LSM(SensorData *data)
 {
-  float sum_x = 0, sum_y = 0, sum_z = 0;
+  float sum_y = 0;
   uint8_t i;
 
   printf("Calibrating offsets... Keep sensor still.\r\n");
@@ -308,23 +343,15 @@ void Offset_LSM(SensorData *data)
   for (i = 0; i < 20; i++)
   {
     Read_Accel(data, 0); // Read without subtracting offset
-    sum_x += data->ax;
     sum_y += data->ay;
-    sum_z += data->az;
     HAL_Delay(100);
   }
 
-  data->ax_offset = sum_x / 20.0f;
   data->ay_offset = sum_y / 20.0f;
-  data->az_offset = sum_z / 20.0f;
 
   printf("Offsets -> X: %.2f, Y: %.2f, Z: %.2f\r\n", data->ax_offset, data->ay_offset, data->az_offset);
 }
 
-void Print_data(SensorData *data)
-{
-  printf("%d,$\r\n", data->gx);
-}
 
 /**
  * @brief System Clock Configuration
