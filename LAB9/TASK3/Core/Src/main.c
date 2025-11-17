@@ -18,8 +18,11 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "stdio.h"
-#include "math.h"
+#include <stdio.h>
+#include <math.h>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846f
+#endif
 #include "stm32f3xx_hal_i2c.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -150,8 +153,8 @@ int main(void)
   /* USER CODE BEGIN 2 */
   Init_LSM();
   Init_Gyro();
-  Offset_LSM(&sensor);              // <-- add this
-  Calibrate_Gyro(&sensor); // Add this!
+  Offset_LSM(&sensor);            
+  Calibrate_Gyro(&sensor); 
   printf("System Ready\r\n");
   /* USER CODE END 2 */
 
@@ -177,14 +180,21 @@ while (1)
     // --- Complementary Filter (FIXED: use sensor.gy not sensor.gx) ---
     angleX = 0.98f * (angleX + sensor.gy * dt) + 0.02f * accAngleY;
 
-    // --- Print: Accel Angle, Gyro Rate, Fused Angle ---
-    printf("%.2f\r\n", sensor.ay_offset);
+    // --- Print: Accel Angle, Gyro Rate, Fused Angle ---// After #include <math.h>
+extern float asinf(float);
+extern double fabs(double);
 
-    printf("%.2f,%.2f,%.2f\r\n", accAngleY, sensor.gy, angleX);
+    printf("%.2f\t %.2f\t %.2f\t\r\n", accAngleY, sensor.gy, angleX);
 
     HAL_Delay(100);
 }
 }
+
+
+
+
+
+
 
 void Init_LSM(void)
 {
@@ -269,26 +279,28 @@ void Init_Gyro(void)
 void Read_Gyro(SensorData *s)
 {
     int16_t gy_raw;
-
-    // Read Y-axis (low and high bytes)
     uint8_t yl = spi_read(OUT_Y_L_G);
     uint8_t yh = spi_read(OUT_Y_H_G);
     
     gy_raw = (int16_t)(yh << 8 | yl);
-
-    // Convert to degrees per second (8.75 mdps/LSB for ±245 dps)
     s->raw_gy = gy_raw;
     s->gy = (gy_raw * 8.75f / 1000.0f) - s->gy_offset;
+
+    // Dead-zone: ignore very small gyro values
+    if (fabs(s->gy) < 0.1f)  // 0.1 deg/s threshold
+        s->gy = 0.0f;
 }
 
 void Calibrate_Gyro(SensorData *s)
 {
     float sum_gy = 0;
-    uint8_t samples = 100;
+    uint16_t samples = 500;  // Increase samples
 
-    printf("Calibrating gyroscope... Keep sensor STILL!\r\n");
+    printf("Calibrating gyroscope in 2 seconds...\r\n");
+    HAL_Delay(2000);  // Give time to place device flat
+    printf("Calibrating... Keep sensor STILL!\r\n");
 
-    for (uint8_t i = 0; i < samples; i++)
+    for (uint16_t i = 0; i < samples; i++)
     {
         int16_t gy_raw;
         uint8_t yl = spi_read(OUT_Y_L_G);
@@ -302,17 +314,13 @@ void Calibrate_Gyro(SensorData *s)
 
     s->gy_offset = sum_gy / samples;
 
-    printf("Gyro Y Offset: %.2f deg/s\r\n", s->gy_offset);
+    printf("Gyro Y Offset: %.3f deg/s\r\n", s->gy_offset);
 }
-
-
-
 
 void Read_Accel(SensorData *data, float apply_offset)
 {
   uint8_t raw[6];
-  HAL_I2C_Mem_Read(&hi2c1, 0x33, 0x2a, I2C_MEMADD_SIZE_8BIT, &raw[2], 1, HAL_MAX_DELAY);
-  HAL_I2C_Mem_Read(&hi2c1, 0x33, 0x2b, I2C_MEMADD_SIZE_8BIT, &raw[3], 1, HAL_MAX_DELAY);
+  HAL_I2C_Mem_Read(&hi2c1, 0x32, OUT_X_L_A | 0x80, I2C_MEMADD_SIZE_8BIT, raw, 6, HAL_MAX_DELAY);
 
 
   data->raw_ay = (int16_t)((raw[3] << 8) | raw[2]);
@@ -320,7 +328,8 @@ void Read_Accel(SensorData *data, float apply_offset)
   data->raw_ay = (data->raw_ay) >> 6 ;
 
 
-  float ay_scaled = data->raw_ay * (4.0f / 100.0f);
+  float ay_scaled = data->raw_ay * 0.004f * 9.81f;
+
 
   if (apply_offset)
   {
