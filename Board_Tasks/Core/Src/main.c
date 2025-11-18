@@ -1,20 +1,20 @@
 /* USER CODE BEGIN Header */
 /**
-  ******************************************************************************
-  * @file           : main.c
-  * @brief          : Main program body
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2025 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
-  */
+ ******************************************************************************
+ * @file           : main.c
+ * @brief          : Main program body
+ ******************************************************************************
+ * @attention
+ *
+ * Copyright (c) 2025 STMicroelectronics.
+ * All rights reserved.
+ *
+ * This software is licensed under terms that can be found in the LICENSE file
+ * in the root directory of this software component.
+ * If no LICENSE file comes with this software, it is provided AS-IS.
+ *
+ ******************************************************************************
+ */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
@@ -35,12 +35,12 @@
 typedef struct
 {
   int16_t raw_ax, raw_ay, raw_az;
-  float   ax, ay, az;
-  float   ax_offset, ay_offset, az_offset;
+  float ax, ay, az;
+  float ax_offset, ay_offset, az_offset;
 
   int16_t raw_gx, raw_gy, raw_gz;
-  float   gx, gy, gz;
-  float   gy_offset;
+  float gx, gy, gz;
+  float gy_offset;
 } SensorData;
 
 /* USER CODE END PTD */
@@ -49,28 +49,35 @@ typedef struct
 /* USER CODE BEGIN PD */
 
 // Accelerometer (LSM303AGR) over I2C
-#define LSM303AGR_ACC_ADDR   (0x19 << 1)
-#define CTRL_REG1_A          0x20
-#define CTRL_REG4_A          0x23
-#define OUT_X_L_A            0x28
+#define LSM303AGR_ACC_ADDR (0x19 << 1)
+#define CTRL_REG1_A 0x20
+#define CTRL_REG4_A 0x23
+#define OUT_X_L_A 0x28
 
 // Gyro (I3G4250D) over SPI
-#define WHO_AM_I_G           0x0F
-#define CTRL_REG1_G          0x20
-#define CTRL_REG4_G          0x23
-#define OUT_Y_L_G            0x2A
-#define OUT_Y_H_G            0x2B
+#define WHO_AM_I_G 0x0F
+#define CTRL_REG1_G 0x20
+#define CTRL_REG4_G 0x23
+#define OUT_Y_L_G 0x2A
+#define OUT_Y_H_G 0x2B
 
 // Gyro SPI CS on PE3 (built-in on F3-Discovery)
-#define CS_LOW()   HAL_GPIO_WritePin(GPIOE, CS_I2C_SPI_Pin, GPIO_PIN_RESET)
-#define CS_HIGH()  HAL_GPIO_WritePin(GPIOE, CS_I2C_SPI_Pin, GPIO_PIN_SET)
+#define CS_LOW() HAL_GPIO_WritePin(GPIOE, CS_I2C_SPI_Pin, GPIO_PIN_RESET)
+#define CS_HIGH() HAL_GPIO_WritePin(GPIOE, CS_I2C_SPI_Pin, GPIO_PIN_SET)
 
 // LEDs we use for GPIO tasks
-#define LED_100HZ_PORT GPIOE   // LD3 -> PE9
-#define LED_100HZ_PIN  GPIO_PIN_9
+#define LED_100HZ_PORT GPIOE // LD3 -> PE9
+#define LED_100HZ_PIN GPIO_PIN_9
 
-#define LED_10HZ_PORT  GPIOE   // LD4 -> PE8
-#define LED_10HZ_PIN   GPIO_PIN_8
+#define LED_10HZ_PORT GPIOE // LD4 -> PE8
+#define LED_10HZ_PIN GPIO_PIN_8
+
+#define BT_BUFFER_SIZE 128
+volatile char bt_rx_buffer[BT_BUFFER_SIZE];
+volatile uint8_t bt_rx_index = 0;
+volatile uint8_t bt_data_ready = 0;
+volatile uint8_t imu_streaming_enabled = 0;
+volatile uint8_t imu_send_counter = 0;
 
 /* USER CODE END PD */
 
@@ -86,7 +93,8 @@ SPI_HandleTypeDef hspi1;
 
 TIM_HandleTypeDef htim2;
 
-UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart1; // HC-05 Bluetooth
+UART_HandleTypeDef huart2; // ST-Link Debug
 
 PCD_HandleTypeDef hpcd_USB_FS;
 
@@ -95,11 +103,11 @@ PCD_HandleTypeDef hpcd_USB_FS;
 SensorData sensor;
 
 // shared between ISR and main
-volatile float accAngleY = 0.0f;  // tilt from accelerometer (deg)
-volatile float angleX    = 0.0f;  // fused angle (deg)
-float          dt        = 0.01f; // 100 Hz
+volatile float accAngleY = 0.0f; // tilt from accelerometer (deg)
+volatile float angleX = 0.0f;    // fused angle (deg)
+float dt = 0.01f;                // 100 Hz
 
-volatile uint8_t flag_10Hz = 0;   // set by ISR every 10 periods
+volatile uint8_t flag_10Hz = 0; // set by ISR every 10 periods
 
 /* USER CODE END PV */
 
@@ -109,12 +117,18 @@ static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_TIM2_Init(void);
-static void MX_USART2_UART_Init(void);
+static void MX_USART1_UART_Init(void); // HC-05
+static void MX_USART2_UART_Init(void); // Debug
 static void MX_USB_PCD_Init(void);
 /* USER CODE BEGIN PFP */
 
 // printf support over USART2
 int _write(int file, char *ptr, int len);
+
+// Bluetooth functions
+void BT_SendString(char *str);
+void ProcessBluetoothCommand(char *cmd);
+void SendIMUDataBT(void);
 
 // Sensor functions
 void Init_LSM(void);
@@ -138,12 +152,17 @@ int _write(int file, char *ptr, int len)
   return len;
 }
 
+void BT_SendString(char *str)
+{
+  HAL_UART_Transmit(&huart1, (uint8_t *)str, strlen(str), HAL_MAX_DELAY);
+}
+
 /* USER CODE END 0 */
 
 /**
-  * @brief  The application entry point.
-  * @retval int
-  */
+ * @brief  The application entry point.
+ * @retval int
+ */
 int main(void)
 {
 
@@ -172,9 +191,12 @@ int main(void)
   MX_I2C1_Init();
   MX_SPI1_Init();
   MX_TIM2_Init();
-  MX_USART2_UART_Init();
+  MX_USART1_UART_Init(); // HC-05 Bluetooth
+  MX_USART2_UART_Init(); // Debug terminal
   MX_USB_PCD_Init();
   /* USER CODE BEGIN 2 */
+
+  HAL_UART_Receive_IT(&huart1, (uint8_t *)&bt_rx_buffer[bt_rx_index], 1);
 
   // 3 & 4: Enable accelerometer and gyro
   Init_LSM();
@@ -187,7 +209,11 @@ int main(void)
   // Start TIM2 with interrupt -> ISR at 100 Hz
   HAL_TIM_Base_Start_IT(&htim2);
 
-  printf("\r\nSystem Ready (100 Hz ISR, 10 Hz main)\r\n");
+  printf("\r\nSTM32F3 Discovery + HC-05 Bluetooth Ready\r\n");
+  printf("System Running at 100 Hz ISR, 10 Hz main loop\r\n\r\n");
+
+  BT_SendString("STM32 Connected!\r\n");
+  BT_SendString("Commands: IMU_START, IMU_STOP, STATUS, HELP\r\n");
 
   /* USER CODE END 2 */
 
@@ -195,6 +221,22 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+
+    if (bt_data_ready)
+    {
+      bt_data_ready = 0;
+
+      // Echo to debug terminal
+      printf("BT CMD: %s\r\n", (char *)bt_rx_buffer);
+
+      // Process command
+      ProcessBluetoothCommand((char *)bt_rx_buffer);
+
+      // Clear buffer
+      memset((void *)bt_rx_buffer, 0, BT_BUFFER_SIZE);
+      bt_rx_index = 0;
+    }
+
     // 2,3,4: 10 Hz tasks in main loop (GPIO toggle + UART + sensor read)
     if (flag_10Hz)
     {
@@ -211,8 +253,10 @@ int main(void)
 
       // Compute tilt from accelerometer (Y axis)
       float y_norm = sensor.ay / 9.81f;
-      if (y_norm >  1.0f) y_norm =  1.0f;
-      if (y_norm < -1.0f) y_norm = -1.0f;
+      if (y_norm > 1.0f)
+        y_norm = 1.0f;
+      if (y_norm < -1.0f)
+        y_norm = -1.0f;
 
       accAngleY = asinf(y_norm) * 180.0f / M_PI;
 
@@ -221,6 +265,11 @@ int main(void)
              sensor.ay, sensor.gy, accAngleY, angleX);
     }
 
+    // Send IMU data via Bluetooth if streaming enabled
+    if (imu_streaming_enabled)
+    {
+      SendIMUDataBT();
+    }
     // background work here if needed (non-blocking)
     /* USER CODE END WHILE */
 
@@ -230,9 +279,9 @@ int main(void)
 }
 
 /**
-  * @brief System Clock Configuration
-  * @retval None
-  */
+ * @brief System Clock Configuration
+ * @retval None
+ */
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
@@ -240,9 +289,9 @@ void SystemClock_Config(void)
   RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
 
   /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_HSE;
+   * in the RCC_OscInitTypeDef structure.
+   */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI | RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
   RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
@@ -256,9 +305,8 @@ void SystemClock_Config(void)
   }
 
   /** Initializes the CPU, AHB and APB buses clocks
-  */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+   */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
@@ -268,8 +316,7 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USB|RCC_PERIPHCLK_USART2
-                              |RCC_PERIPHCLK_I2C1;
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USB | RCC_PERIPHCLK_USART2 | RCC_PERIPHCLK_I2C1;
   PeriphClkInit.Usart2ClockSelection = RCC_USART2CLKSOURCE_PCLK1;
   PeriphClkInit.I2c1ClockSelection = RCC_I2C1CLKSOURCE_HSI;
   PeriphClkInit.USBClockSelection = RCC_USBCLKSOURCE_PLL;
@@ -280,10 +327,10 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief I2C1 Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief I2C1 Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_I2C1_Init(void)
 {
 
@@ -309,14 +356,14 @@ static void MX_I2C1_Init(void)
   }
 
   /** Configure Analogue filter
-  */
+   */
   if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
   {
     Error_Handler();
   }
 
   /** Configure Digital filter
-  */
+   */
   if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
   {
     Error_Handler();
@@ -324,14 +371,13 @@ static void MX_I2C1_Init(void)
   /* USER CODE BEGIN I2C1_Init 2 */
 
   /* USER CODE END I2C1_Init 2 */
-
 }
 
 /**
-  * @brief SPI1 Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief SPI1 Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_SPI1_Init(void)
 {
 
@@ -364,14 +410,13 @@ static void MX_SPI1_Init(void)
   /* USER CODE BEGIN SPI1_Init 2 */
 
   /* USER CODE END SPI1_Init 2 */
-
 }
 
 /**
-  * @brief TIM2 Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief TIM2 Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_TIM2_Init(void)
 {
 
@@ -409,14 +454,32 @@ static void MX_TIM2_Init(void)
   /* USER CODE BEGIN TIM2_Init 2 */
 
   /* USER CODE END TIM2_Init 2 */
+}
 
+
+static void MX_USART1_UART_Init(void)
+{
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 9600;  // HC-05 default baud rate
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
 }
 
 /**
-  * @brief USART2 Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief USART2 Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_USART2_UART_Init(void)
 {
 
@@ -444,14 +507,13 @@ static void MX_USART2_UART_Init(void)
   /* USER CODE BEGIN USART2_Init 2 */
 
   /* USER CODE END USART2_Init 2 */
-
 }
 
 /**
-  * @brief USB Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief USB Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_USB_PCD_Init(void)
 {
 
@@ -475,14 +537,13 @@ static void MX_USB_PCD_Init(void)
   /* USER CODE BEGIN USB_Init 2 */
 
   /* USER CODE END USB_Init 2 */
-
 }
 
 /**
-  * @brief GPIO Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief GPIO Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -498,14 +559,11 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOE, CS_I2C_SPI_Pin|GPIO_PIN_8|GPIO_PIN_9|LD5_Pin
-                          |LD7_Pin|LD9_Pin|LD10_Pin|LD8_Pin
-                          |LD6_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOE, CS_I2C_SPI_Pin | GPIO_PIN_8 | GPIO_PIN_9 | LD5_Pin | LD7_Pin | LD9_Pin | LD10_Pin | LD8_Pin | LD6_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : DRDY_Pin MEMS_INT3_Pin MEMS_INT4_Pin MEMS_INT1_Pin
                            MEMS_INT2_Pin */
-  GPIO_InitStruct.Pin = DRDY_Pin|MEMS_INT3_Pin|MEMS_INT4_Pin|MEMS_INT1_Pin
-                          |MEMS_INT2_Pin;
+  GPIO_InitStruct.Pin = DRDY_Pin | MEMS_INT3_Pin | MEMS_INT4_Pin | MEMS_INT1_Pin | MEMS_INT2_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_EVT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
@@ -513,9 +571,7 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pins : CS_I2C_SPI_Pin PE8 PE9 LD5_Pin
                            LD7_Pin LD9_Pin LD10_Pin LD8_Pin
                            LD6_Pin */
-  GPIO_InitStruct.Pin = CS_I2C_SPI_Pin|GPIO_PIN_8|GPIO_PIN_9|LD5_Pin
-                          |LD7_Pin|LD9_Pin|LD10_Pin|LD8_Pin
-                          |LD6_Pin;
+  GPIO_InitStruct.Pin = CS_I2C_SPI_Pin | GPIO_PIN_8 | GPIO_PIN_9 | LD5_Pin | LD7_Pin | LD9_Pin | LD10_Pin | LD8_Pin | LD6_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -533,6 +589,88 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+
+// ===== UART Receive Callback (Bluetooth) =====
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART1)
+  {
+    char c = bt_rx_buffer[bt_rx_index];
+    
+    // Check for command terminator
+    if (c == '\n' || c == '\r')
+    {
+      if (bt_rx_index > 0)
+      {
+        bt_rx_buffer[bt_rx_index] = '\0';
+        bt_data_ready = 1;
+      }
+    }
+    else
+    {
+      bt_rx_index++;
+      if (bt_rx_index >= BT_BUFFER_SIZE - 1)
+      {
+        bt_rx_index = 0;  // Overflow protection
+      }
+    }
+    
+    // Re-enable interrupt for next byte
+    HAL_UART_Receive_IT(&huart1, (uint8_t *)&bt_rx_buffer[bt_rx_index], 1);
+  }
+}
+
+// ===== Send IMU Data via Bluetooth =====
+void SendIMUDataBT(void)
+{
+  char buffer[128];
+  
+  // Format as JSON for easy parsing on mobile
+  sprintf(buffer, 
+          "{\"ay\":%.2f,\"gy\":%.2f,\"angle_acc\":%.2f,\"angle_fused\":%.2f}\r\n",
+          sensor.ay, sensor.gy, accAngleY, angleX);
+  
+  BT_SendString(buffer);
+}
+
+// ===== Process Bluetooth Commands =====
+void ProcessBluetoothCommand(char *cmd)
+{
+  char response[128];
+  
+  if (strcmp(cmd, "IMU_START") == 0)
+  {
+    imu_streaming_enabled = 1;
+    printf("BT: IMU streaming started\r\n");
+    BT_SendString("IMU streaming started at 10Hz\r\n");
+  }
+  else if (strcmp(cmd, "IMU_STOP") == 0)
+  {
+    imu_streaming_enabled = 0;
+    printf("BT: IMU streaming stopped\r\n");
+    BT_SendString("IMU streaming stopped\r\n");
+  }
+  else if (strcmp(cmd, "STATUS") == 0)
+  {
+    sprintf(response, "System OK | IMU: %s | Angle: %.2f deg\r\n",
+            imu_streaming_enabled ? "ON" : "OFF", angleX);
+    BT_SendString(response);
+  }
+  else if (strcmp(cmd, "HELP") == 0)
+  {
+    BT_SendString("Commands:\r\n");
+    BT_SendString("  IMU_START - Start streaming\r\n");
+    BT_SendString("  IMU_STOP - Stop streaming\r\n");
+    BT_SendString("  STATUS - System status\r\n");
+  }
+  else
+  {
+    BT_SendString("Unknown command. Send HELP\r\n");
+  }
+}
+
+
 
 // 1 & 5: 100 Hz timer ISR: toggle LED + loop filter + 10 Hz flag
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
@@ -581,14 +719,11 @@ void Read_Accel(SensorData *data, float apply_offset)
   uint8_t raw[6];
   HAL_I2C_Mem_Read(&hi2c1, 0x32, OUT_X_L_A | 0x80, I2C_MEMADD_SIZE_8BIT, raw, 6, HAL_MAX_DELAY);
 
-
   data->raw_ay = (int16_t)((raw[3] << 8) | raw[2]);
 
-  data->raw_ay = (data->raw_ay) >> 6 ;
-
+  data->raw_ay = (data->raw_ay) >> 6;
 
   float ay_scaled = data->raw_ay * 0.004f * 9.81f;
-
 
   if (apply_offset)
   {
@@ -599,7 +734,6 @@ void Read_Accel(SensorData *data, float apply_offset)
     data->ay = ay_scaled;
   }
 }
-
 
 void Offset_LSM(SensorData *data)
 {
@@ -620,11 +754,10 @@ void Offset_LSM(SensorData *data)
   printf("Offsets -> X: %.2f, Y: %.2f, Z: %.2f\r\n", data->ax_offset, data->ay_offset, data->az_offset);
 }
 
-
 // ==== Gyro (SPI) ====
 void spi_write(uint8_t reg, uint8_t value)
 {
-  uint8_t data[2] = { (uint8_t)(reg & 0x7F), value };  // write: MSB=0
+  uint8_t data[2] = {(uint8_t)(reg & 0x7F), value}; // write: MSB=0
   CS_LOW();
   HAL_SPI_Transmit(&hspi1, data, 2, HAL_MAX_DELAY);
   CS_HIGH();
@@ -713,9 +846,9 @@ void Calibrate_Gyro(SensorData *s)
 /* USER CODE END 4 */
 
 /**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
+ * @brief  This function is executed in case of error occurrence.
+ * @retval None
+ */
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
@@ -727,12 +860,12 @@ void Error_Handler(void)
 }
 #ifdef USE_FULL_ASSERT
 /**
-  * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
-  */
+ * @brief  Reports the name of the source file and the source line number
+ *         where the assert_param error has occurred.
+ * @param  file: pointer to the source file name
+ * @param  line: assert_param error line source number
+ * @retval None
+ */
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */
