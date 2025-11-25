@@ -21,8 +21,10 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "string.h"
 #include <stdio.h>
 #include <math.h>
+#include <stdarg.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f
@@ -42,6 +44,19 @@ typedef struct
   float gx, gy, gz;
   float gy_offset;
 } SensorData;
+
+typedef enum
+{
+  MOTOR_RIGHT = 0,
+  MOTOR_LEFT = 1
+} MotorID;
+
+typedef enum
+{
+  DIR_FORWARD = 1,
+  DIR_BACKWARD = -1,
+  DIR_BRAKE = 0
+} MotorDirection;
 
 /* USER CODE END PTD */
 
@@ -73,11 +88,64 @@ typedef struct
 #define LED_10HZ_PIN GPIO_PIN_8
 
 #define BT_BUFFER_SIZE 128
+
+#define PWM_MIN 200 // don't go below ~20% or motor may stall
+#define PWM_MAX 999
+#define KP 8.0f // start with these, we'll tune live
+#define KI 0.5f
+#define KD 0.0f
+#define DT 0.001f // control loop runs every 50 ms (20 Hz)
+
 volatile char bt_rx_buffer[BT_BUFFER_SIZE];
 volatile uint8_t bt_rx_index = 0;
 volatile uint8_t bt_data_ready = 0;
 volatile uint8_t imu_streaming_enabled = 0;
 volatile uint8_t imu_send_counter = 0;
+
+// Balance PID (angle -> target speed)
+typedef struct
+{
+  float setpoint; // Target angle (typically 0 degrees = upright)
+  float kp, ki, kd;
+  float integral;
+  float prev_error;
+  float output; // Output is target motor speed
+} BalancePID_t;
+
+// Motor Speed PID (RPM -> PWM)
+typedef struct
+{
+  float setpoint; // Target RPM from balance PID
+  float kp, ki, kd;
+  float integral;
+  float prev_error;
+  float output; // Output is PWM value
+} SpeedPID_t;
+
+// Initialize PIDs
+BalancePID_t balance_pid = {
+    .setpoint = 0.0f, // 0 degrees = upright
+    .kp = 1.0f,      // Start values - tune these!
+    .ki = 0.0f,       // Start with 0, add later if needed
+    .kd = 1.5f,
+    .integral = 0.0f,
+    .prev_error = 0.0f};
+
+SpeedPID_t speed_pid_left = {
+    .setpoint = 0.0f,
+    .kp = 3.0f,
+    .ki = 0.2f,
+    .kd = 0.0f,
+    .integral = 0.0f,
+    .prev_error = 0.0f};
+
+SpeedPID_t speed_pid_right = {
+    .setpoint = 0.0f,
+    .kp = 3.0f,
+    .ki = 0.2f,
+    .kd = 0.0f,
+    .integral = 0.0f,
+    .prev_error = 0.0f};
 
 /* USER CODE END PD */
 
@@ -92,13 +160,35 @@ I2C_HandleTypeDef hi2c1;
 SPI_HandleTypeDef hspi1;
 
 TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim3;
+TIM_HandleTypeDef htim4;
+TIM_HandleTypeDef htim8;
 
-UART_HandleTypeDef huart1; // HC-05 Bluetooth
-UART_HandleTypeDef huart2; // ST-Link Debug
+UART_HandleTypeDef huart2;
 
 PCD_HandleTypeDef hpcd_USB_FS;
 
 /* USER CODE BEGIN PV */
+
+// Encoder setup
+#define ENCODER_Pin GPIO_PIN_12
+#define ENCODER_PORT GPIOD
+
+// Constants
+#define PPR 330 // pulses per revolution
+#define RPM_CALC_INTERVAL 100
+
+// Globals
+uint32_t last_pid_time = 0;
+
+volatile uint32_t last_rpm_calc_time = 0;
+// Right motor encoder
+volatile uint32_t encoder_right_count = 0;
+volatile float rpm_right = 0.0f;
+
+// Left motor encoder (NEW)
+volatile uint32_t encoder_left_count = 0;
+volatile float rpm_left = 0.0f;
 
 SensorData sensor;
 
@@ -117,9 +207,11 @@ static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_TIM2_Init(void);
-static void MX_USART1_UART_Init(void); // HC-05
-static void MX_USART2_UART_Init(void); // Debug
+static void MX_USART2_UART_Init(void);
 static void MX_USB_PCD_Init(void);
+static void MX_TIM3_Init(void);
+static void MX_TIM4_Init(void);
+static void MX_TIM8_Init(void);
 /* USER CODE BEGIN PFP */
 
 // printf support over USART2
@@ -146,6 +238,160 @@ void Calibrate_Gyro(SensorData *s);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+// ===== BALANCE PID COMPUTE =====
+float Balance_PID_Compute(BalancePID_t *pid, float angle, float dt)
+{
+  // Error = target - current
+  float error = pid->setpoint - angle;
+
+  // Integral with anti-windup
+  pid->integral += error * dt;
+  if (pid->integral > 100.0f)
+    pid->integral = 100.0f;
+  if (pid->integral < -100.0f)
+    pid->integral = -100.0f;
+
+  // Derivative
+  float derivative = (error - pid->prev_error) / dt;
+  pid->prev_error = error;
+
+  // PID output (target motor speed in RPM)
+  float output = pid->kp * error +
+                 pid->ki * pid->integral +
+                 pid->kd * derivative;
+
+  // Limit output to reasonable motor speeds
+  if (output > 150.0f)
+    output = 150.0f;
+  if (output < -150.0f)
+    output = -150.0f;
+
+  pid->output = output;
+  return output;
+}
+
+// ===== MOTOR SPEED PID COMPUTE =====
+float Speed_PID_Compute(SpeedPID_t *pid, float measured_rpm, float dt)
+{
+  float error = pid->setpoint - measured_rpm;
+
+  pid->integral += error * dt;
+
+  // Anti-windup
+  if (pid->integral > 300.0f)
+    pid->integral = 300.0f;
+  if (pid->integral < -300.0f)
+    pid->integral = -300.0f;
+
+  float derivative = (error - pid->prev_error) / dt;
+  pid->prev_error = error;
+
+  float output = pid->kp * error +
+                 pid->ki * pid->integral +
+                 pid->kd * derivative;
+
+  // Convert to PWM (0-999)
+  if (output > 999.0f)
+    output = 999.0f;
+  if (output < -999.0f)
+    output = -999.0f;
+
+  pid->output = output;
+  return output;
+}
+
+// ===== SAFETY: Check if robot has fallen =====
+uint8_t Is_Fallen(float angle)
+{
+  // If angle is beyond ±45 degrees, robot has fallen
+  if (fabsf(angle) > 45.0f)
+  {
+    return 1; // Fallen
+  }
+  return 0; // Still balancing
+}
+
+// Set motor direction
+void Motor_SetDirection(MotorID motor, MotorDirection dir)
+{
+  if (motor == MOTOR_RIGHT)
+  {
+    if (dir == DIR_FORWARD)
+    {
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_SET);   // AIN1 = 1
+      HAL_GPIO_WritePin(GPIOF, GPIO_PIN_4, GPIO_PIN_RESET); // AIN2 = 0
+    }
+    else if (dir == DIR_BACKWARD)
+    {
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET); // AIN1 = 0
+      HAL_GPIO_WritePin(GPIOF, GPIO_PIN_4, GPIO_PIN_SET);   // AIN2 = 1
+    }
+    else
+    { // BRAKE
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(GPIOF, GPIO_PIN_4, GPIO_PIN_RESET);
+    }
+  }
+  else if (motor == MOTOR_LEFT)
+  {
+    if (dir == DIR_FORWARD)
+    {
+      HAL_GPIO_WritePin(GPIOC, GPIO_PIN_4, GPIO_PIN_SET);   // BIN1 = 1
+      HAL_GPIO_WritePin(GPIOC, GPIO_PIN_5, GPIO_PIN_RESET); // BIN2 = 0
+    }
+    else if (dir == DIR_BACKWARD)
+    {
+      HAL_GPIO_WritePin(GPIOC, GPIO_PIN_4, GPIO_PIN_RESET); // BIN1 = 0
+      HAL_GPIO_WritePin(GPIOC, GPIO_PIN_5, GPIO_PIN_SET);   // BIN2 = 1
+    }
+    else
+    { // BRAKE
+      HAL_GPIO_WritePin(GPIOC, GPIO_PIN_4, GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(GPIOC, GPIO_PIN_5, GPIO_PIN_RESET);
+    }
+  }
+}
+
+// Set motor PWM (0-1000)
+void Motor_SetPWM(MotorID motor, uint16_t pwm_value)
+{
+  // Clamp to max
+  if (pwm_value > 1000)
+    pwm_value = 1000;
+
+  // Scale to TIM3 period (65535)
+  uint32_t compare = (pwm_value * 65535) / 1000;
+
+  if (motor == MOTOR_RIGHT)
+  {
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, compare);
+  }
+  else if (motor == MOTOR_LEFT)
+  {
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, compare);
+  }
+}
+
+// Set motor speed with direction (-1000 to +1000)
+void Motor_SetSpeed(MotorID motor, int16_t speed)
+{
+  if (speed > 0)
+  {
+    Motor_SetDirection(motor, DIR_FORWARD);
+    Motor_SetPWM(motor, speed);
+  }
+  else if (speed < 0)
+  {
+    Motor_SetDirection(motor, DIR_BACKWARD);
+    Motor_SetPWM(motor, -speed); // Make positive
+  }
+  else
+  {
+    Motor_SetDirection(motor, DIR_BRAKE);
+    Motor_SetPWM(motor, 0);
+  }
+}
+
 int _write(int file, char *ptr, int len)
 {
   HAL_UART_Transmit(&huart2, (uint8_t *)ptr, len, HAL_MAX_DELAY);
@@ -154,7 +400,7 @@ int _write(int file, char *ptr, int len)
 
 void BT_SendString(char *str)
 {
-  HAL_UART_Transmit(&huart1, (uint8_t *)str, strlen(str), HAL_MAX_DELAY);
+  HAL_UART_Transmit(&huart2, (uint8_t *)str, strlen(str), HAL_MAX_DELAY);
 }
 
 /* USER CODE END 0 */
@@ -172,8 +418,7 @@ int main(void)
 
   /* MCU Configuration--------------------------------------------------------*/
 
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-  HAL_Init();
+  /* Reset of all peripherals, Initializes the Flash interface and the SyHAL_Init();
 
   /* USER CODE BEGIN Init */
 
@@ -191,12 +436,31 @@ int main(void)
   MX_I2C1_Init();
   MX_SPI1_Init();
   MX_TIM2_Init();
-  MX_USART1_UART_Init(); // HC-05 Bluetooth
-  MX_USART2_UART_Init(); // Debug terminal
+  MX_USART2_UART_Init();
   MX_USB_PCD_Init();
+  MX_TIM3_Init();
+  MX_TIM4_Init();
+  MX_TIM8_Init();
   /* USER CODE BEGIN 2 */
 
-  HAL_UART_Receive_IT(&huart1, (uint8_t *)&bt_rx_buffer[bt_rx_index], 1);
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 32768); // 50% of 65535
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 32768);
+
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOF, GPIO_PIN_4, GPIO_PIN_RESET);
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 800); // 50% duty cycle
+  HAL_TIM_IC_Start_IT(&htim4, TIM_CHANNEL_1);        // Right encoder
+
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_4, GPIO_PIN_SET);   // BIN1
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_5, GPIO_PIN_RESET); // BIN2
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);             // Left PWM
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 800);    // 50% duty
+  HAL_TIM_IC_Start_IT(&htim8, TIM_CHANNEL_1);           // Left encoder
+
+  HAL_UART_Receive_IT(&huart2, (uint8_t *)&bt_rx_buffer[bt_rx_index], 1);
 
   // 3 & 4: Enable accelerometer and gyro
   Init_LSM();
@@ -214,13 +478,68 @@ int main(void)
 
   BT_SendString("STM32 Connected!\r\n");
   BT_SendString("Commands: IMU_START, IMU_STOP, STATUS, HELP\r\n");
-
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    // Calculate RPM for both motors every 100ms
+    // === 100ms RPM calculation + PID control ===
+    uint32_t now = HAL_GetTick();
+    if (now - last_rpm_calc_time >= RPM_CALC_INTERVAL)
+    {
+      last_rpm_calc_time = now;
+      float dt = RPM_CALC_INTERVAL / 1000.0f; // 0.1 seconds
+
+      // --- Calculate RPM from encoders ---
+      float pps_right = (encoder_right_count * 1000.0f) / RPM_CALC_INTERVAL;
+      float pps_left = (encoder_left_count * 1000.0f) / RPM_CALC_INTERVAL;
+
+      rpm_right = (pps_right / PPR) * 60.0f;
+      rpm_left = (pps_left / PPR) * 60.0f;
+
+      // Reset counters
+      encoder_right_count = 0;
+      encoder_left_count = 0;
+
+      // --- SAFETY CHECK ---
+      if (Is_Fallen(angleX))
+      {
+        // Robot has fallen - stop motors
+        Motor_SetSpeed(MOTOR_LEFT, 0);
+        Motor_SetSpeed(MOTOR_RIGHT, 0);
+
+        // Reset PID integrals
+        balance_pid.integral = 0.0f;
+        speed_pid_left.integral = 0.0f;
+        speed_pid_right.integral = 0.0f;
+
+        printf("FALLEN! Angle: %.1f deg\r\n", angleX);
+        continue; // Skip control loop
+      }
+
+      // --- STEP 1: Balance PID (Angle -> Target Speed) ---
+      float target_speed = Balance_PID_Compute(&balance_pid, angleX, dt);
+
+      // Set target speeds for both motors
+      speed_pid_left.setpoint = target_speed;
+      speed_pid_right.setpoint = target_speed;
+
+      // --- STEP 2: Speed PID (RPM -> PWM) ---
+      float pwm_left = Speed_PID_Compute(&speed_pid_left, rpm_left, dt);
+      float pwm_right = Speed_PID_Compute(&speed_pid_right, rpm_right, dt);
+
+      // --- STEP 3: Apply PWM to motors ---
+      Motor_SetSpeed(MOTOR_LEFT, (int16_t)pwm_left);
+      Motor_SetSpeed(MOTOR_RIGHT, (int16_t)pwm_right);
+
+      // --- Debug Output ---
+      printf("Ang:%.1f | Tgt:%.0f | L:%.0fRPM(%.0f) R:%.0fRPM(%.0f)\r\n",
+             angleX, target_speed,
+             rpm_left, pwm_left,
+             rpm_right, pwm_right);
+    }
 
     if (bt_data_ready)
     {
@@ -261,8 +580,7 @@ int main(void)
       accAngleY = asinf(y_norm) * 180.0f / M_PI;
 
       // Send UART at 10 Hz
-      printf("%.2f\t %.2f\t %.2f\t FusedX=%.2f\r\n",
-             sensor.ay, sensor.gy, accAngleY, angleX);
+      printf("%.2f\t %.2f\t %.2f\t FusedX=%.2f\r\n", sensor.ay, sensor.gy, accAngleY, angleX);
     }
 
     // Send IMU data via Bluetooth if streaming enabled
@@ -316,10 +634,11 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USB | RCC_PERIPHCLK_USART2 | RCC_PERIPHCLK_I2C1;
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USB | RCC_PERIPHCLK_USART2 | RCC_PERIPHCLK_I2C1 | RCC_PERIPHCLK_TIM8;
   PeriphClkInit.Usart2ClockSelection = RCC_USART2CLKSOURCE_PCLK1;
   PeriphClkInit.I2c1ClockSelection = RCC_I2C1CLKSOURCE_HSI;
   PeriphClkInit.USBClockSelection = RCC_USBCLKSOURCE_PLL;
+  PeriphClkInit.Tim8ClockSelection = RCC_TIM8CLK_HCLK;
   if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
   {
     Error_Handler();
@@ -456,23 +775,152 @@ static void MX_TIM2_Init(void)
   /* USER CODE END TIM2_Init 2 */
 }
 
-
-static void MX_USART1_UART_Init(void)
+/**
+ * @brief TIM3 Initialization Function
+ * @param None
+ * @retval None
+ */
+static void MX_TIM3_Init(void)
 {
-  huart1.Instance = USART1;
-  huart1.Init.BaudRate = 9600;  // HC-05 default baud rate
-  huart1.Init.WordLength = UART_WORDLENGTH_8B;
-  huart1.Init.StopBits = UART_STOPBITS_1;
-  huart1.Init.Parity = UART_PARITY_NONE;
-  huart1.Init.Mode = UART_MODE_TX_RX;
-  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
-  huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  if (HAL_UART_Init(&huart1) != HAL_OK)
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 47;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 999;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
   {
     Error_Handler();
   }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM3_Init 2 */
+
+  /* USER CODE END TIM3_Init 2 */
+  HAL_TIM_MspPostInit(&htim3);
+}
+
+/**
+ * @brief TIM4 Initialization Function
+ * @param None
+ * @retval None
+ */
+static void MX_TIM4_Init(void)
+{
+
+  /* USER CODE BEGIN TIM4_Init 0 */
+
+  /* USER CODE END TIM4_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_IC_InitTypeDef sConfigIC = {0};
+
+  /* USER CODE BEGIN TIM4_Init 1 */
+
+  /* USER CODE END TIM4_Init 1 */
+  htim4.Instance = TIM4;
+  htim4.Init.Prescaler = 71;
+  htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim4.Init.Period = 65535;
+  htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_IC_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_RISING;
+  sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
+  sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
+  sConfigIC.ICFilter = 0;
+  if (HAL_TIM_IC_ConfigChannel(&htim4, &sConfigIC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM4_Init 2 */
+
+  /* USER CODE END TIM4_Init 2 */
+}
+
+/**
+ * @brief TIM8 Initialization Function
+ * @param None
+ * @retval None
+ */
+static void MX_TIM8_Init(void)
+{
+
+  /* USER CODE BEGIN TIM8_Init 0 */
+
+  /* USER CODE END TIM8_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_IC_InitTypeDef sConfigIC = {0};
+
+  /* USER CODE BEGIN TIM8_Init 1 */
+
+  /* USER CODE END TIM8_Init 1 */
+  htim8.Instance = TIM8;
+  htim8.Init.Prescaler = 71;
+  htim8.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim8.Init.Period = 65535;
+  htim8.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim8.Init.RepetitionCounter = 0;
+  htim8.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_IC_Init(&htim8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterOutputTrigger2 = TIM_TRGO2_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim8, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_RISING;
+  sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
+  sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
+  sConfigIC.ICFilter = 0;
+  if (HAL_TIM_IC_ConfigChannel(&htim8, &sConfigIC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM8_Init 2 */
+
+  /* USER CODE END TIM8_Init 2 */
 }
 
 /**
@@ -491,7 +939,7 @@ static void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 115200;
+  huart2.Init.BaudRate = 9600;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;
@@ -556,10 +1004,20 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOF_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOE, CS_I2C_SPI_Pin | GPIO_PIN_8 | GPIO_PIN_9 | LD5_Pin | LD7_Pin | LD9_Pin | LD10_Pin | LD8_Pin | LD6_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOF, GPIO_PIN_4, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_4 | GPIO_PIN_5, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : DRDY_Pin MEMS_INT3_Pin MEMS_INT4_Pin MEMS_INT1_Pin
                            MEMS_INT2_Pin */
@@ -583,6 +1041,27 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : PA1 */
+  GPIO_InitStruct.Pin = GPIO_PIN_1;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PF4 */
+  GPIO_InitStruct.Pin = GPIO_PIN_4;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PC4 PC5 */
+  GPIO_InitStruct.Pin = GPIO_PIN_4 | GPIO_PIN_5;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
   /* USER CODE END MX_GPIO_Init_2 */
@@ -590,6 +1069,20 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
+{
+  // Right motor encoder (TIM4)
+  if (htim->Instance == TIM4 && htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1)
+  {
+    encoder_right_count++;
+  }
+
+  // Left motor encoder (TIM8) - NEW
+  if (htim->Instance == TIM8 && htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1)
+  {
+    encoder_left_count++;
+  }
+}
 
 // ===== UART Receive Callback (Bluetooth) =====
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -597,7 +1090,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   if (huart->Instance == USART1)
   {
     char c = bt_rx_buffer[bt_rx_index];
-    
+
     // Check for command terminator
     if (c == '\n' || c == '\r')
     {
@@ -612,12 +1105,12 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
       bt_rx_index++;
       if (bt_rx_index >= BT_BUFFER_SIZE - 1)
       {
-        bt_rx_index = 0;  // Overflow protection
+        bt_rx_index = 0; // Overflow protection
       }
     }
-    
+
     // Re-enable interrupt for next byte
-    HAL_UART_Receive_IT(&huart1, (uint8_t *)&bt_rx_buffer[bt_rx_index], 1);
+    HAL_UART_Receive_IT(&huart2, (uint8_t *)&bt_rx_buffer[bt_rx_index], 1);
   }
 }
 
@@ -625,12 +1118,12 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 void SendIMUDataBT(void)
 {
   char buffer[128];
-  
+
   // Format as JSON for easy parsing on mobile
-  sprintf(buffer, 
+  sprintf(buffer,
           "{\"ay\":%.2f,\"gy\":%.2f,\"angle_acc\":%.2f,\"angle_fused\":%.2f}\r\n",
           sensor.ay, sensor.gy, accAngleY, angleX);
-  
+
   BT_SendString(buffer);
 }
 
@@ -638,39 +1131,77 @@ void SendIMUDataBT(void)
 void ProcessBluetoothCommand(char *cmd)
 {
   char response[128];
-  
-  if (strcmp(cmd, "IMU_START") == 0)
+  float temp_val;
+
+  // NEW: PID Tuning Commands
+  if (sscanf(cmd, "KP %f", &temp_val) == 1)
   {
-    imu_streaming_enabled = 1;
-    printf("BT: IMU streaming started\r\n");
-    BT_SendString("IMU streaming started at 10Hz\r\n");
-  }
-  else if (strcmp(cmd, "IMU_STOP") == 0)
-  {
-    imu_streaming_enabled = 0;
-    printf("BT: IMU streaming stopped\r\n");
-    BT_SendString("IMU streaming stopped\r\n");
-  }
-  else if (strcmp(cmd, "STATUS") == 0)
-  {
-    sprintf(response, "System OK | IMU: %s | Angle: %.2f deg\r\n",
-            imu_streaming_enabled ? "ON" : "OFF", angleX);
+    balance_pid.kp = temp_val;
+    sprintf(response, "Balance Kp = %.2f\r\n", balance_pid.kp);
     BT_SendString(response);
   }
-  else if (strcmp(cmd, "HELP") == 0)
+  else if (sscanf(cmd, "KI %f", &temp_val) == 1)
   {
-    BT_SendString("Commands:\r\n");
-    BT_SendString("  IMU_START - Start streaming\r\n");
-    BT_SendString("  IMU_STOP - Stop streaming\r\n");
-    BT_SendString("  STATUS - System status\r\n");
+    balance_pid.ki = temp_val;
+    sprintf(response, "Balance Ki = %.2f\r\n", balance_pid.ki);
+    BT_SendString(response);
   }
+  else if (sscanf(cmd, "KD %f", &temp_val) == 1)
+  {
+    balance_pid.kd = temp_val;
+    sprintf(response, "Balance Kd = %.2f\r\n", balance_pid.kd);
+    BT_SendString(response);
+  }
+  else if (strcmp(cmd, "RESET") == 0)
+  {
+    // Reset all PID integrals
+    balance_pid.integral = 0.0f;
+    speed_pid_left.integral = 0.0f;
+    speed_pid_right.integral = 0.0f;
+    BT_SendString("PIDs reset\r\n");
+  }
+  else if (strcmp(cmd, "STOP") == 0)
+  {
+    Motor_SetSpeed(MOTOR_LEFT, 0);
+    Motor_SetSpeed(MOTOR_RIGHT, 0);
+    BT_SendString("Motors stopped\r\n");
+  }
+  else if (strcmp(cmd, "PARAMS") == 0)
+  {
+    //sprintf(response, "Balance: Kp=%.2f Ki=%.2f Kd=%.2f\r\n""Speed: Kp=%.2f Ki=%.2f\r\n",balance_pid.kp, balance_pid.ki, balance_pid.kd,speed_pid_left.kp, speed_pid_left.ki);
+    BT_SendString(response);
+  }
+
+  // if (strcmp(cmd, "IMU_START") == 0)
+  // {
+  //   imu_streaming_enabled = 1;
+  //   printf("BT: IMU streaming started\r\n");
+  //   BT_SendString("IMU streaming started at 10Hz\r\n");
+  // }
+  // else if (strcmp(cmd, "IMU_STOP") == 0)
+  // {
+  //   imu_streaming_enabled = 0;
+  //   printf("BT: IMU streaming stopped\r\n");
+  //   BT_SendString("IMU streaming stopped\r\n");
+  // }
+  // else if (strcmp(cmd, "STATUS") == 0)
+  // {
+  //   sprintf(response, "System OK | IMU: %s | Angle: %.2f deg\r\n",
+  //           imu_streaming_enabled ? "ON" : "OFF", angleX);
+  //   BT_SendString(response);
+  // }
+  // else if (strcmp(cmd, "HELP") == 0)
+  // {
+  //   BT_SendString("Commands:\r\n");
+  //   BT_SendString("  IMU_START - Start streaming\r\n");
+  //   BT_SendString("  IMU_STOP - Stop streaming\r\n");
+  //   BT_SendString("  STATUS - System status\r\n");
+  // }
   else
   {
     BT_SendString("Unknown command. Send HELP\r\n");
   }
 }
-
-
 
 // 1 & 5: 100 Hz timer ISR: toggle LED + loop filter + 10 Hz flag
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
