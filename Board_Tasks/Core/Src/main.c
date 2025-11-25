@@ -91,9 +91,6 @@ typedef enum
 
 #define PWM_MIN 200 // don't go below ~20% or motor may stall
 #define PWM_MAX 999
-#define KP 8.0f // start with these, we'll tune live
-#define KI 0.5f
-#define KD 0.0f
 #define DT 0.001f // control loop runs every 50 ms (20 Hz)
 
 volatile char bt_rx_buffer[BT_BUFFER_SIZE];
@@ -112,37 +109,11 @@ typedef struct
   float output; // Output is target motor speed
 } BalancePID_t;
 
-// Motor Speed PID (RPM -> PWM)
-typedef struct
-{
-  float setpoint; // Target RPM from balance PID
-  float kp, ki, kd;
-  float integral;
-  float prev_error;
-  float output; // Output is PWM value
-} SpeedPID_t;
-
 // Initialize PIDs
 BalancePID_t balance_pid = {
     .setpoint = 0.0f, // 0 degrees = upright
-    .kp = 1.0f,      // Start values - tune these!
+    .kp = 10.0f,      // Start values - tune these!
     .ki = 0.0f,       // Start with 0, add later if needed
-    .kd = 1.5f,
-    .integral = 0.0f,
-    .prev_error = 0.0f};
-
-SpeedPID_t speed_pid_left = {
-    .setpoint = 0.0f,
-    .kp = 3.0f,
-    .ki = 0.2f,
-    .kd = 0.0f,
-    .integral = 0.0f,
-    .prev_error = 0.0f};
-
-SpeedPID_t speed_pid_right = {
-    .setpoint = 0.0f,
-    .kp = 3.0f,
-    .ki = 0.2f,
     .kd = 0.0f,
     .integral = 0.0f,
     .prev_error = 0.0f};
@@ -241,62 +212,42 @@ void Calibrate_Gyro(SensorData *s);
 // ===== BALANCE PID COMPUTE =====
 float Balance_PID_Compute(BalancePID_t *pid, float angle, float dt)
 {
-  // Error = target - current
   float error = pid->setpoint - angle;
+
+  // Deadband - stop if nearly balanced
+  if (fabsf(error) < 0.3f)
+  {
+    pid->integral = 0.0f;
+    pid->prev_error = error;
+    return 0.0f; // Stop motors when balanced
+  }
 
   // Integral with anti-windup
   pid->integral += error * dt;
-  if (pid->integral > 100.0f)
-    pid->integral = 100.0f;
-  if (pid->integral < -100.0f)
-    pid->integral = -100.0f;
+  if (pid->integral > 50.0f)
+    pid->integral = 50.0f;
+  if (pid->integral < -50.0f)
+    pid->integral = -50.0f;
 
   // Derivative
   float derivative = (error - pid->prev_error) / dt;
   pid->prev_error = error;
 
-  // PID output (target motor speed in RPM)
+  // PID output (PWM value)
   float output = pid->kp * error +
                  pid->ki * pid->integral +
                  pid->kd * derivative;
 
-  // Limit output to reasonable motor speeds
-  if (output > 150.0f)
-    output = 150.0f;
-  if (output < -150.0f)
-    output = -150.0f;
-
-  pid->output = output;
-  return output;
-}
-
-// ===== MOTOR SPEED PID COMPUTE =====
-float Speed_PID_Compute(SpeedPID_t *pid, float measured_rpm, float dt)
-{
-  float error = pid->setpoint - measured_rpm;
-
-  pid->integral += error * dt;
-
-  // Anti-windup
-  if (pid->integral > 300.0f)
-    pid->integral = 300.0f;
-  if (pid->integral < -300.0f)
-    pid->integral = -300.0f;
-
-  float derivative = (error - pid->prev_error) / dt;
-  pid->prev_error = error;
-
-  float output = pid->kp * error +
-                 pid->ki * pid->integral +
-                 pid->kd * derivative;
-
-  // Convert to PWM (0-999)
+  // Limit to PWM range
   if (output > 999.0f)
     output = 999.0f;
   if (output < -999.0f)
     output = -999.0f;
 
-  pid->output = output;
+  // PWM deadband
+  if (fabsf(output) < 100.0f)
+    output = 0.0f;
+
   return output;
 }
 
@@ -447,18 +398,18 @@ int main(void)
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 32768); // 50% of 65535
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 32768);
+  Motor_SetSpeed(MOTOR_LEFT, 0);
+  Motor_SetSpeed(MOTOR_RIGHT, 0);
 
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_SET);
   HAL_GPIO_WritePin(GPIOF, GPIO_PIN_4, GPIO_PIN_RESET);
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 800); // 50% duty cycle
-  HAL_TIM_IC_Start_IT(&htim4, TIM_CHANNEL_1);        // Right encoder
 
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_4, GPIO_PIN_SET);   // BIN1
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_5, GPIO_PIN_RESET); // BIN2
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);             // Left PWM
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 800);    // 50% duty
-  HAL_TIM_IC_Start_IT(&htim8, TIM_CHANNEL_1);           // Left encoder
 
   HAL_UART_Receive_IT(&huart2, (uint8_t *)&bt_rx_buffer[bt_rx_index], 1);
 
@@ -473,127 +424,73 @@ int main(void)
   // Start TIM2 with interrupt -> ISR at 100 Hz
   HAL_TIM_Base_Start_IT(&htim2);
 
-  printf("\r\nSTM32F3 Discovery + HC-05 Bluetooth Ready\r\n");
-  printf("System Running at 100 Hz ISR, 10 Hz main loop\r\n\r\n");
-
-  BT_SendString("STM32 Connected!\r\n");
-  BT_SendString("Commands: IMU_START, IMU_STOP, STATUS, HELP\r\n");
+  printf("\r\n=== Self-Balancing Robot ===\r\n");
+  printf("Balance PID: Kp=%.1f Ki=%.1f Kd=%.1f\r\n",
+         balance_pid.kp, balance_pid.ki, balance_pid.kd);
   /* USER CODE END 2 */
 
   /* Infinite loop */
+
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    // Calculate RPM for both motors every 100ms
-    // === 100ms RPM calculation + PID control ===
+    // === 10ms Control Loop (100Hz) ===
     uint32_t now = HAL_GetTick();
-    if (now - last_rpm_calc_time >= RPM_CALC_INTERVAL)
+    static uint32_t last_control_time = 0;
+
+    if (now - last_control_time >= 10) // 100Hz control
     {
-      last_rpm_calc_time = now;
-      float dt = RPM_CALC_INTERVAL / 1000.0f; // 0.1 seconds
-
-      // --- Calculate RPM from encoders ---
-      float pps_right = (encoder_right_count * 1000.0f) / RPM_CALC_INTERVAL;
-      float pps_left = (encoder_left_count * 1000.0f) / RPM_CALC_INTERVAL;
-
-      rpm_right = (pps_right / PPR) * 60.0f;
-      rpm_left = (pps_left / PPR) * 60.0f;
-
-      // Reset counters
-      encoder_right_count = 0;
-      encoder_left_count = 0;
+      last_control_time = now;
+      float dt = 0.01f; // 10ms = 0.01s
 
       // --- SAFETY CHECK ---
       if (Is_Fallen(angleX))
       {
-        // Robot has fallen - stop motors
         Motor_SetSpeed(MOTOR_LEFT, 0);
         Motor_SetSpeed(MOTOR_RIGHT, 0);
-
-        // Reset PID integrals
         balance_pid.integral = 0.0f;
-        speed_pid_left.integral = 0.0f;
-        speed_pid_right.integral = 0.0f;
-
-        printf("FALLEN! Angle: %.1f deg\r\n", angleX);
-        continue; // Skip control loop
+        printf("FALLEN! Angle: %.1f\r\n", angleX);
+        continue;
       }
 
-      // --- STEP 1: Balance PID (Angle -> Target Speed) ---
-      float target_speed = Balance_PID_Compute(&balance_pid, angleX, dt);
+      // --- Balance PID (Angle -> PWM) ---
+      float pwm = Balance_PID_Compute(&balance_pid, angleX, dt);
 
-      // Set target speeds for both motors
-      speed_pid_left.setpoint = target_speed;
-      speed_pid_right.setpoint = target_speed;
+      // Apply same PWM to both motors
+      Motor_SetSpeed(MOTOR_LEFT, (int16_t)pwm);
+      Motor_SetSpeed(MOTOR_RIGHT, (int16_t)pwm);
 
-      // --- STEP 2: Speed PID (RPM -> PWM) ---
-      float pwm_left = Speed_PID_Compute(&speed_pid_left, rpm_left, dt);
-      float pwm_right = Speed_PID_Compute(&speed_pid_right, rpm_right, dt);
-
-      // --- STEP 3: Apply PWM to motors ---
-      Motor_SetSpeed(MOTOR_LEFT, (int16_t)pwm_left);
-      Motor_SetSpeed(MOTOR_RIGHT, (int16_t)pwm_right);
-
-      // --- Debug Output ---
-      printf("Ang:%.1f | Tgt:%.0f | L:%.0fRPM(%.0f) R:%.0fRPM(%.0f)\r\n",
-             angleX, target_speed,
-             rpm_left, pwm_left,
-             rpm_right, pwm_right);
+      // --- Debug Output with Error ---
+      static uint8_t print_counter = 0;
+      print_counter++;
+      if (print_counter >= 10) // Print every 100ms
+      {
+        print_counter = 0;
+        float error = balance_pid.setpoint - angleX;
+        printf("Ang:%.2f | Err:%.2f | PWM:%.0f | I:%.2f\r\n",
+               angleX, error, pwm, balance_pid.integral);
+      }
     }
 
+    // Bluetooth commands
     if (bt_data_ready)
     {
       bt_data_ready = 0;
-
-      // Echo to debug terminal
       printf("BT CMD: %s\r\n", (char *)bt_rx_buffer);
-
-      // Process command
       ProcessBluetoothCommand((char *)bt_rx_buffer);
-
-      // Clear buffer
       memset((void *)bt_rx_buffer, 0, BT_BUFFER_SIZE);
       bt_rx_index = 0;
     }
 
-    // 2,3,4: 10 Hz tasks in main loop (GPIO toggle + UART + sensor read)
+    // 10Hz flag for other tasks
     if (flag_10Hz)
     {
       flag_10Hz = 0;
-
-      // 2. Toggle another GPIO at 10 Hz
       HAL_GPIO_TogglePin(LED_10HZ_PORT, LED_10HZ_PIN);
-
-      // 3. Read accelerometer @10 Hz
-      Read_Accel(&sensor, 1); // apply offset
-
-      // 4. Read gyro @10 Hz
-      Read_Gyro(&sensor);
-
-      // Compute tilt from accelerometer (Y axis)
-      float y_norm = sensor.ay / 9.81f;
-      if (y_norm > 1.0f)
-        y_norm = 1.0f;
-      if (y_norm < -1.0f)
-        y_norm = -1.0f;
-
-      accAngleY = asinf(y_norm) * 180.0f / M_PI;
-
-      // Send UART at 10 Hz
-      printf("%.2f\t %.2f\t %.2f\t FusedX=%.2f\r\n", sensor.ay, sensor.gy, accAngleY, angleX);
     }
 
-    // Send IMU data via Bluetooth if streaming enabled
-    if (imu_streaming_enabled)
-    {
-      SendIMUDataBT();
-    }
-    // background work here if needed (non-blocking)
     /* USER CODE END WHILE */
-
-    /* USER CODE BEGIN 3 */
   }
-  /* USER CODE END 3 */
 }
 
 /**
@@ -1071,17 +968,6 @@ static void MX_GPIO_Init(void)
 
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 {
-  // Right motor encoder (TIM4)
-  if (htim->Instance == TIM4 && htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1)
-  {
-    encoder_right_count++;
-  }
-
-  // Left motor encoder (TIM8) - NEW
-  if (htim->Instance == TIM8 && htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1)
-  {
-    encoder_left_count++;
-  }
 }
 
 // ===== UART Receive Callback (Bluetooth) =====
@@ -1152,14 +1038,6 @@ void ProcessBluetoothCommand(char *cmd)
     sprintf(response, "Balance Kd = %.2f\r\n", balance_pid.kd);
     BT_SendString(response);
   }
-  else if (strcmp(cmd, "RESET") == 0)
-  {
-    // Reset all PID integrals
-    balance_pid.integral = 0.0f;
-    speed_pid_left.integral = 0.0f;
-    speed_pid_right.integral = 0.0f;
-    BT_SendString("PIDs reset\r\n");
-  }
   else if (strcmp(cmd, "STOP") == 0)
   {
     Motor_SetSpeed(MOTOR_LEFT, 0);
@@ -1168,7 +1046,7 @@ void ProcessBluetoothCommand(char *cmd)
   }
   else if (strcmp(cmd, "PARAMS") == 0)
   {
-    //sprintf(response, "Balance: Kp=%.2f Ki=%.2f Kd=%.2f\r\n""Speed: Kp=%.2f Ki=%.2f\r\n",balance_pid.kp, balance_pid.ki, balance_pid.kd,speed_pid_left.kp, speed_pid_left.ki);
+    // sprintf(response, "Balance: Kp=%.2f Ki=%.2f Kd=%.2f\r\n""Speed: Kp=%.2f Ki=%.2f\r\n",balance_pid.kp, balance_pid.ki, balance_pid.kd,speed_pid_left.kp, speed_pid_left.ki);
     BT_SendString(response);
   }
 
@@ -1210,6 +1088,21 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   {
     // 1. GPIO toggle at 100 Hz
     HAL_GPIO_TogglePin(LED_100HZ_PORT, LED_100HZ_PIN);
+
+    // 3. Read accelerometer @10 Hz
+    Read_Accel(&sensor, 1); // apply offset
+
+    // 4. Read gyro @10 Hz
+    Read_Gyro(&sensor);
+
+    // Compute tilt from accelerometer (Y axis)
+    float y_norm = sensor.ay / 9.81f;
+    if (y_norm > 1.0f)
+      y_norm = 1.0f;
+    if (y_norm < -1.0f)
+      y_norm = -1.0f;
+
+    accAngleY = asinf(y_norm) * 180.0f / M_PI;
 
     // 5. Complementary loop filter at 100 Hz
     angleX = 0.98f * (angleX + sensor.gy * dt) + 0.02f * accAngleY;
