@@ -26,6 +26,12 @@
 #include <math.h>
 #include <stdarg.h>
 
+#include "config.h"
+#include "pid.h"
+#include "sensors.h"
+#include "motors.h"
+#include "bluetooth.h"
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f
 #endif
@@ -33,30 +39,6 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
-typedef struct
-{
-  int16_t raw_ax, raw_ay, raw_az;
-  float ax, ay, az;
-  float ax_offset, ay_offset, az_offset;
-
-  int16_t raw_gx, raw_gy, raw_gz;
-  float gx, gy, gz;
-  float gy_offset;
-} SensorData;
-
-typedef enum
-{
-  MOTOR_RIGHT = 0,
-  MOTOR_LEFT = 1
-} MotorID;
-
-typedef enum
-{
-  DIR_FORWARD = 1,
-  DIR_BACKWARD = -1,
-  DIR_BRAKE = 0
-} MotorDirection;
 
 /* USER CODE END PTD */
 
@@ -99,15 +81,6 @@ volatile uint8_t bt_data_ready = 0;
 volatile uint8_t imu_streaming_enabled = 0;
 volatile uint8_t imu_send_counter = 0;
 
-// Balance PID (angle -> target speed)
-typedef struct
-{
-  float setpoint; // Target angle (typically 0 degrees = upright)
-  float kp, ki, kd;
-  float integral;
-  float prev_error;
-  float output; // Output is target motor speed
-} BalancePID_t;
 
 // Initialize PIDs
 BalancePID_t balance_pid = {
@@ -164,8 +137,8 @@ volatile float rpm_left = 0.0f;
 SensorData sensor;
 
 // shared between ISR and main
-volatile float accAngleY = 0.0f; // tilt from accelerometer (deg)
-volatile float angleX = 0.0f;    // fused angle (deg)
+ float accAngleY = 0.0f; // tilt from accelerometer (deg)
+ float angleX = 0.0f;    // fused angle (deg)
 float dt = 0.01f;                // 100 Hz
 
 volatile uint8_t flag_10Hz = 0; // set by ISR every 10 periods
@@ -188,21 +161,7 @@ static void MX_TIM8_Init(void);
 // printf support over USART2
 int _write(int file, char *ptr, int len);
 
-// Bluetooth functions
-void BT_SendString(char *str);
-void ProcessBluetoothCommand(char *cmd);
-void SendIMUDataBT(void);
 
-// Sensor functions
-void Init_LSM(void);
-void Offset_LSM(SensorData *data);
-void Read_Accel(SensorData *data, float apply_offset);
-
-void spi_write(uint8_t reg, uint8_t value);
-uint8_t spi_read(uint8_t reg);
-void Init_Gyro(void);
-void Read_Gyro(SensorData *s);
-void Calibrate_Gyro(SensorData *s);
 
 /* USER CODE END PFP */
 
@@ -210,138 +169,9 @@ void Calibrate_Gyro(SensorData *s);
 /* USER CODE BEGIN 0 */
 
 // ===== BALANCE PID COMPUTE =====
-float Balance_PID_Compute(BalancePID_t *pid, float angle, float dt)
-{
-  float error = pid->setpoint - angle;
 
-  // Deadband - stop if nearly balanced
-  if (fabsf(error) < 0.3f)
-  {
-    pid->integral = 0.0f;
-    pid->prev_error = error;
-    return 0.0f; // Stop motors when balanced
-  }
 
-  // Integral with anti-windup
-  pid->integral += error * dt;
-  if (pid->integral > 50.0f)
-    pid->integral = 50.0f;
-  if (pid->integral < -50.0f)
-    pid->integral = -50.0f;
 
-  // Derivative
-  float derivative = (error - pid->prev_error) / dt;
-  pid->prev_error = error;
-
-  // PID output (PWM value)
-  float output = pid->kp * error +
-                 pid->ki * pid->integral +
-                 pid->kd * derivative;
-
-  // Limit to PWM range
-  if (output > 999.0f)
-    output = 999.0f;
-  if (output < -999.0f)
-    output = -999.0f;
-
-  // PWM deadband
-  if (fabsf(output) < 100.0f)
-    output = 0.0f;
-
-  return output;
-}
-
-// ===== SAFETY: Check if robot has fallen =====
-uint8_t Is_Fallen(float angle)
-{
-  // If angle is beyond ±45 degrees, robot has fallen
-  if (fabsf(angle) > 45.0f)
-  {
-    return 1; // Fallen
-  }
-  return 0; // Still balancing
-}
-
-// Set motor direction
-void Motor_SetDirection(MotorID motor, MotorDirection dir)
-{
-  if (motor == MOTOR_RIGHT)
-  {
-    if (dir == DIR_FORWARD)
-    {
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_SET);   // AIN1 = 1
-      HAL_GPIO_WritePin(GPIOF, GPIO_PIN_4, GPIO_PIN_RESET); // AIN2 = 0
-    }
-    else if (dir == DIR_BACKWARD)
-    {
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET); // AIN1 = 0
-      HAL_GPIO_WritePin(GPIOF, GPIO_PIN_4, GPIO_PIN_SET);   // AIN2 = 1
-    }
-    else
-    { // BRAKE
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
-      HAL_GPIO_WritePin(GPIOF, GPIO_PIN_4, GPIO_PIN_RESET);
-    }
-  }
-  else if (motor == MOTOR_LEFT)
-  {
-    if (dir == DIR_FORWARD)
-    {
-      HAL_GPIO_WritePin(GPIOC, GPIO_PIN_4, GPIO_PIN_SET);   // BIN1 = 1
-      HAL_GPIO_WritePin(GPIOC, GPIO_PIN_5, GPIO_PIN_RESET); // BIN2 = 0
-    }
-    else if (dir == DIR_BACKWARD)
-    {
-      HAL_GPIO_WritePin(GPIOC, GPIO_PIN_4, GPIO_PIN_RESET); // BIN1 = 0
-      HAL_GPIO_WritePin(GPIOC, GPIO_PIN_5, GPIO_PIN_SET);   // BIN2 = 1
-    }
-    else
-    { // BRAKE
-      HAL_GPIO_WritePin(GPIOC, GPIO_PIN_4, GPIO_PIN_RESET);
-      HAL_GPIO_WritePin(GPIOC, GPIO_PIN_5, GPIO_PIN_RESET);
-    }
-  }
-}
-
-// Set motor PWM (0-1000)
-void Motor_SetPWM(MotorID motor, uint16_t pwm_value)
-{
-  // Clamp to max
-  if (pwm_value > 1000)
-    pwm_value = 1000;
-
-  // Scale to TIM3 period (65535)
-  uint32_t compare = (pwm_value * 65535) / 1000;
-
-  if (motor == MOTOR_RIGHT)
-  {
-    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, compare);
-  }
-  else if (motor == MOTOR_LEFT)
-  {
-    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, compare);
-  }
-}
-
-// Set motor speed with direction (-1000 to +1000)
-void Motor_SetSpeed(MotorID motor, int16_t speed)
-{
-  if (speed > 0)
-  {
-    Motor_SetDirection(motor, DIR_FORWARD);
-    Motor_SetPWM(motor, speed);
-  }
-  else if (speed < 0)
-  {
-    Motor_SetDirection(motor, DIR_BACKWARD);
-    Motor_SetPWM(motor, -speed); // Make positive
-  }
-  else
-  {
-    Motor_SetDirection(motor, DIR_BRAKE);
-    Motor_SetPWM(motor, 0);
-  }
-}
 
 int _write(int file, char *ptr, int len)
 {
@@ -349,10 +179,7 @@ int _write(int file, char *ptr, int len)
   return len;
 }
 
-void BT_SendString(char *str)
-{
-  HAL_UART_Transmit(&huart2, (uint8_t *)str, strlen(str), HAL_MAX_DELAY);
-}
+
 
 /* USER CODE END 0 */
 
@@ -1000,87 +827,6 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   }
 }
 
-// ===== Send IMU Data via Bluetooth =====
-void SendIMUDataBT(void)
-{
-  char buffer[128];
-
-  // Format as JSON for easy parsing on mobile
-  sprintf(buffer,
-          "{\"ay\":%.2f,\"gy\":%.2f,\"angle_acc\":%.2f,\"angle_fused\":%.2f}\r\n",
-          sensor.ay, sensor.gy, accAngleY, angleX);
-
-  BT_SendString(buffer);
-}
-
-// ===== Process Bluetooth Commands =====
-void ProcessBluetoothCommand(char *cmd)
-{
-  char response[128];
-  float temp_val;
-
-  // NEW: PID Tuning Commands
-  if (sscanf(cmd, "KP %f", &temp_val) == 1)
-  {
-    balance_pid.kp = temp_val;
-    sprintf(response, "Balance Kp = %.2f\r\n", balance_pid.kp);
-    BT_SendString(response);
-  }
-  else if (sscanf(cmd, "KI %f", &temp_val) == 1)
-  {
-    balance_pid.ki = temp_val;
-    sprintf(response, "Balance Ki = %.2f\r\n", balance_pid.ki);
-    BT_SendString(response);
-  }
-  else if (sscanf(cmd, "KD %f", &temp_val) == 1)
-  {
-    balance_pid.kd = temp_val;
-    sprintf(response, "Balance Kd = %.2f\r\n", balance_pid.kd);
-    BT_SendString(response);
-  }
-  else if (strcmp(cmd, "STOP") == 0)
-  {
-    Motor_SetSpeed(MOTOR_LEFT, 0);
-    Motor_SetSpeed(MOTOR_RIGHT, 0);
-    BT_SendString("Motors stopped\r\n");
-  }
-  else if (strcmp(cmd, "PARAMS") == 0)
-  {
-    // sprintf(response, "Balance: Kp=%.2f Ki=%.2f Kd=%.2f\r\n""Speed: Kp=%.2f Ki=%.2f\r\n",balance_pid.kp, balance_pid.ki, balance_pid.kd,speed_pid_left.kp, speed_pid_left.ki);
-    BT_SendString(response);
-  }
-
-  // if (strcmp(cmd, "IMU_START") == 0)
-  // {
-  //   imu_streaming_enabled = 1;
-  //   printf("BT: IMU streaming started\r\n");
-  //   BT_SendString("IMU streaming started at 10Hz\r\n");
-  // }
-  // else if (strcmp(cmd, "IMU_STOP") == 0)
-  // {
-  //   imu_streaming_enabled = 0;
-  //   printf("BT: IMU streaming stopped\r\n");
-  //   BT_SendString("IMU streaming stopped\r\n");
-  // }
-  // else if (strcmp(cmd, "STATUS") == 0)
-  // {
-  //   sprintf(response, "System OK | IMU: %s | Angle: %.2f deg\r\n",
-  //           imu_streaming_enabled ? "ON" : "OFF", angleX);
-  //   BT_SendString(response);
-  // }
-  // else if (strcmp(cmd, "HELP") == 0)
-  // {
-  //   BT_SendString("Commands:\r\n");
-  //   BT_SendString("  IMU_START - Start streaming\r\n");
-  //   BT_SendString("  IMU_STOP - Stop streaming\r\n");
-  //   BT_SendString("  STATUS - System status\r\n");
-  // }
-  else
-  {
-    BT_SendString("Unknown command. Send HELP\r\n");
-  }
-}
-
 // 1 & 5: 100 Hz timer ISR: toggle LED + loop filter + 10 Hz flag
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
@@ -1118,154 +864,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   }
 }
 
-// ==== Accelerometer (I2C) ====
-void Init_LSM(void)
-{
-  uint8_t data;
 
-  // CTRL_REG1_A: 0x67 = 100 Hz, all axes enabled
-  data = 0x67;
-  HAL_I2C_Mem_Write(&hi2c1, LSM303AGR_ACC_ADDR, CTRL_REG1_A,
-                    I2C_MEMADD_SIZE_8BIT, &data, 1, HAL_MAX_DELAY);
-
-  // CTRL_REG4_A: ±2g, continuous update
-  data = 0x00;
-  HAL_I2C_Mem_Write(&hi2c1, LSM303AGR_ACC_ADDR, CTRL_REG4_A,
-                    I2C_MEMADD_SIZE_8BIT, &data, 1, HAL_MAX_DELAY);
-
-  HAL_Delay(50);
-
-  printf("LSM303AGR Accelerometer Initialized\r\n");
-}
-
-void Read_Accel(SensorData *data, float apply_offset)
-{
-  uint8_t raw[6];
-  HAL_I2C_Mem_Read(&hi2c1, 0x32, OUT_X_L_A | 0x80, I2C_MEMADD_SIZE_8BIT, raw, 6, HAL_MAX_DELAY);
-
-  data->raw_ay = (int16_t)((raw[3] << 8) | raw[2]);
-
-  data->raw_ay = (data->raw_ay) >> 6;
-
-  float ay_scaled = data->raw_ay * 0.004f * 9.81f;
-
-  if (apply_offset)
-  {
-    data->ay = ay_scaled - data->ay_offset;
-  }
-  else
-  {
-    data->ay = ay_scaled;
-  }
-}
-
-void Offset_LSM(SensorData *data)
-{
-  float sum_y = 0;
-  uint8_t i;
-
-  printf("Calibrating offsets... Keep sensor still.\r\n");
-
-  for (i = 0; i < 20; i++)
-  {
-    Read_Accel(data, 0); // Read without subtracting offset
-    sum_y += data->ay;
-    HAL_Delay(100);
-  }
-
-  data->ay_offset = sum_y / 20.0f;
-
-  printf("Offsets -> X: %.2f, Y: %.2f, Z: %.2f\r\n", data->ax_offset, data->ay_offset, data->az_offset);
-}
-
-// ==== Gyro (SPI) ====
-void spi_write(uint8_t reg, uint8_t value)
-{
-  uint8_t data[2] = {(uint8_t)(reg & 0x7F), value}; // write: MSB=0
-  CS_LOW();
-  HAL_SPI_Transmit(&hspi1, data, 2, HAL_MAX_DELAY);
-  CS_HIGH();
-}
-
-uint8_t spi_read(uint8_t reg)
-{
-  uint8_t tx[2];
-  uint8_t rx[2];
-
-  tx[0] = reg | 0x80; // read: MSB=1
-  tx[1] = 0x00;
-
-  CS_LOW();
-  HAL_SPI_TransmitReceive(&hspi1, tx, rx, 2, HAL_MAX_DELAY);
-  CS_HIGH();
-
-  return rx[1];
-}
-
-void Init_Gyro(void)
-{
-  HAL_Delay(100);
-
-  uint8_t whoami = spi_read(WHO_AM_I_G);
-  if (whoami != 0xD3)
-  {
-    printf("Gyro WHO_AM_I error: 0x%02X (expected 0xD3)\r\n", whoami);
-  }
-  else
-  {
-    printf("I3G4250D Gyro WHO_AM_I: 0x%02X OK\r\n", whoami);
-  }
-
-  // CTRL_REG1_G: power on, 100 Hz, all axes
-  spi_write(CTRL_REG1_G, 0x0F);
-
-  // CTRL_REG4_G: ±245 dps
-  spi_write(CTRL_REG4_G, 0x00);
-
-  HAL_Delay(50);
-  printf("I3G4250D Gyroscope Initialized\r\n");
-}
-
-void Read_Gyro(SensorData *s)
-{
-  uint8_t yl = spi_read(OUT_Y_L_G);
-  uint8_t yh = spi_read(OUT_Y_H_G);
-
-  int16_t gy_raw = (int16_t)((yh << 8) | yl);
-  s->raw_gy = gy_raw;
-
-  // 8.75 mdps/LSB -> deg/s
-  s->gy = (gy_raw * 8.75f / 1000.0f) - s->gy_offset;
-
-  // dead-zone
-  if (fabsf(s->gy) < 0.1f)
-    s->gy = 0.0f;
-}
-
-void Calibrate_Gyro(SensorData *s)
-{
-  float sum_gy = 0.0f;
-  uint16_t samples = 500;
-
-  printf("Calibrating gyroscope in 2 seconds... keep still.\r\n");
-  HAL_Delay(2000);
-  printf("Calibrating gyro now...\r\n");
-
-  for (uint16_t i = 0; i < samples; i++)
-  {
-    uint8_t yl = spi_read(OUT_Y_L_G);
-    uint8_t yh = spi_read(OUT_Y_H_G);
-
-    int16_t gy_raw = (int16_t)((yh << 8) | yl);
-    float gy_dps = gy_raw * 8.75f / 1000.0f;
-    sum_gy += gy_dps;
-
-    HAL_Delay(10);
-  }
-
-  s->gy_offset = sum_gy / samples;
-  printf("Gyro Y offset: %.3f dps\r\n", s->gy_offset);
-}
 
 /* USER CODE END 4 */
 
