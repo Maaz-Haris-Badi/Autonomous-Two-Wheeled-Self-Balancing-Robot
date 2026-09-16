@@ -8,12 +8,12 @@
 ## Abstract
 **Project SEER** is an experimental embedded software architecture developed on the **STM32F303** (ARM Cortex-M4) to investigate real-time sensor fusion, hardware-level data acquisition, and constrained environment optimizations. 
 
-Designed as a cohesive research project built through sequential implementation modules, SEER demonstrates how low-level microcontroller primitives (interrupts, direct memory access, hardware timers) can be orchestrated to build a robust foundation for spatial orientation estimation (Angle Estimation). The project serves as a scalable framework for integrating MEMS sensors and serves as a precursor to more complex research in autonomous robotics, drones, and wearable IoT devices.
+Designed as a cohesive project built through sequential implementation modules, SEER demonstrates how low-level microcontroller primitives (interrupts, direct memory access, hardware timers) can be orchestrated to build a robust foundation for spatial orientation estimation (Angle Estimation). The project serves as a scalable framework for integrating MEMS sensors and serves as a precursor to more complex applications in autonomous robotics, drones, and wearable IoT devices.
 
-## 🔬 Research Significance & Technical Objectives
-In embedded systems research, predictable timing, low latency, and efficient memory utilization are paramount. This project systematically tackles these challenges by avoiding high-overhead operating systems in favor of bare-metal and HAL-driven architectures. 
+## 🔬 Technical Objectives
+In embedded systems, predictable timing, low latency, and efficient memory utilization are paramount. This project systematically tackles these challenges by avoiding high-overhead operating systems in favor of bare-metal and HAL-driven architectures. 
 
-Key research and engineering objectives achieved in this project include:
+Key engineering objectives achieved in this project include:
 * **Deterministic Data Acquisition:** Transitioning from CPU-intensive polling to asynchronous, interrupt-driven paradigms to minimize jitter in sensor sampling rates.
 * **Algorithmic Sensor Fusion:** Implementing real-time angle estimation algorithms (combining accelerometer and gyroscope data) while leveraging the Cortex-M4's DSP instructions and hardware Floating Point Unit (FPU) to accelerate mathematical computations.
 * **Protocol Abstraction & Bus Management:** Developing robust, low-level drivers for I2C, SPI, and UART to interface with complex external ICs (e.g., 6-DoF/9-DoF IMUs) while managing bus arbitration.
@@ -72,14 +72,14 @@ cmake --build build
 # Flash the generated .elf or .bin file using STM32CubeProgrammer or OpenOCD via SWD.
 ```
 
-## 📈 Future Research Trajectories
-This project lays the groundwork for advanced academic and industrial research in embedded control:
+## 📈 Future Enhancements
+This project lays the groundwork for advanced applications in embedded control:
 1. **RTOS Integration:** Migrating the bare-metal architecture to FreeRTOS to analyze the overhead of task scheduling, mutexes, and semaphore-based resource sharing on latency.
 2. **Extended Kalman Filter (EKF):** Upgrading the current fusion algorithm to a full state-estimation EKF to account for non-linearities and sensor drift over time.
 3. **Power-State Optimization:** Instrumenting the codebase to actively switch the MCU between active and deep-sleep modes, mathematically profiling the energy footprint for wearable applications.
 
 ## ✉️ Author & Contact
-This architecture was engineered to explore the theoretical and practical intersections of microcontroller hardware and control theory. For inquiries regarding the technical implementation, hardware challenges, or research collaborations, please reach out.
+This architecture was engineered to explore the theoretical and practical intersections of microcontroller hardware and control theory. For inquiries regarding the technical implementation or hardware challenges, please reach out.
 
 ---
 *Developed as part of the Microcontrollers and Interfacing (MCI) coursework at Habib University.*
