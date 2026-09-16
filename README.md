@@ -6,9 +6,9 @@
 ![Domain](https://img.shields.io/badge/domain-Sensor%20Fusion%20%7C%20Embedded%20Systems-purple)
 
 ## Abstract
-**Project SEER** is an experimental embedded software architecture developed on the **STM32F303** (ARM Cortex-M4) to investigate real-time sensor fusion, hardware-level data acquisition, and constrained environment optimizations. 
+The **Autonomous Two-Wheeled Self-Balancing Robot** is a comprehensive course project developing an embedded software architecture on the **STM32F303** (ARM Cortex-M4) to investigate real-time sensor fusion, hardware-level data acquisition, and constrained environment optimizations. 
 
-Designed as a cohesive project built through sequential implementation modules, SEER demonstrates how low-level microcontroller primitives (interrupts, direct memory access, hardware timers) can be orchestrated to build a robust foundation for spatial orientation estimation (Angle Estimation). The project serves as a scalable framework for integrating MEMS sensors and serves as a precursor to more complex applications in autonomous robotics, drones, and wearable IoT devices.
+Designed as a cohesive project built through sequential implementation modules, this robot demonstrates how low-level microcontroller primitives (interrupts, direct memory access, hardware timers) can be orchestrated to build a robust foundation for spatial orientation estimation (Angle Estimation). The project serves as a practical application for integrating MEMS sensors and serves as a precursor to more complex applications in autonomous robotics, drones, and wearable IoT devices.
 
 ## 🔬 Technical Objectives
 In embedded systems, predictable timing, low latency, and efficient memory utilization are paramount. This project systematically tackles these challenges by avoiding high-overhead operating systems in favor of bare-metal and HAL-driven architectures. 
@@ -33,7 +33,7 @@ Key engineering objectives achieved in this project include:
 
 ## 📂 Project Development Modules
 
-The architecture of SEER was constructed incrementally. The codebase is organized into sequential modules (originally developed as laboratory phases), each building upon the previous to form the final sensor fusion engine:
+The architecture of the robot was constructed incrementally. The codebase is organized into sequential modules (originally developed as laboratory phases), each building upon the previous to form the final sensor fusion engine:
 
 ### Phase I: Deterministic Execution and Clocking (Modules 1-4)
 * **System Clock & GPIO:** Established the system tick mechanism and fundamental I/O toggling, analyzing electrical characteristics via oscilloscope.
